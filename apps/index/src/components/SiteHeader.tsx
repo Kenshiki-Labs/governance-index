@@ -18,6 +18,13 @@ export function SiteHeader() {
           >
             Specifications
           </Link>
+          <Link
+            to="/glossary"
+            className="link link-hover opacity-80 hover:opacity-100"
+            activeProps={{ className: "link link-hover opacity-100" }}
+          >
+            Glossary
+          </Link>
           <a
             href="https://github.com/Kenshiki-Labs/governance-index"
             target="_blank"

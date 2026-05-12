@@ -11,10 +11,31 @@ function SpecsIndex() {
   const aeo = deriveAeoPageModel({
     family: "specs-index",
     path: "/specs",
+    frontmatter: {
+      aeo: {
+        faqs: [
+          {
+            question: "Which specification should I read first?",
+            answer:
+              "Start with the Executive Summary (one page, positioning + methodology overview). Then read KGB-Public for the behavioral methodology that drives the leaderboard. KGB-Structural covers the artifact-audit instrument and reads independently. KGB Tool is engineering depth for implementers and includes the canonical DAG-judge prompt template plus fully-worked bridge and probe artifacts in Appendices A–C.",
+          },
+          {
+            question: "How do I cite a KGB specification?",
+            answer:
+              "Reference both the methodology and the specific version of the runner you used. The recommended BibTeX entry is included on the specifications index page. When citing specific findings, reference the full report ID and runner version; reports embed `tool_sha256` and `registry_sha256` for unambiguous identification.",
+          },
+          {
+            question: "Are the specifications stable?",
+            answer:
+              "v0.1 is a Public Draft. Major versions (v1.0+) freeze the methodology so any published report can be replayed and verified indefinitely. Minor versions (v0.2, v0.3) add probes, bridge classes, and regulatory mappings; old reports remain valid within their version. Patch versions (v0.1.x) are clarifications and errata.",
+          },
+        ],
+      },
+    },
     defaults: {
       title: "Specifications — Governance Benchmark",
       description:
-        "The four KGB specifications under Apache 2.0: executive summary, KGB-Public (behavioral methodology), KGB-Structural (artifact audit), KGB Tool (engineering reference).",
+        "The four KGB specifications under Apache 2.0 — executive summary, behavioral methodology, artifact audit, and engineering reference for the runner.",
     },
   });
 

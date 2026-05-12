@@ -6,6 +6,7 @@
 
 - [The Governance Benchmark](https://index.kenshikilabs.com/): The public benchmark for AI governance properties. The yardstick the industry argues about.
 - [Specifications](https://index.kenshikilabs.com/specs): The four KGB specifications — methodology, runner, leaderboard governance.
+- [Glossary](https://index.kenshikilabs.com/glossary): Canonical definitions for the KGB v0.1 governance lexicon — behavioral dimensions, judge architecture, catalog terminology, classification taxonomy.
 
 ## Methodology specifications
 

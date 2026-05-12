@@ -1,7 +1,7 @@
 ---
 seo:
-  title: "KGB Executive Summary v0.1 — Kenshiki Governance Benchmark"
-  description: "One-page methodology overview: what KGB measures, the four behavioral dimensions, how an evaluation runs, reproducibility guarantees, and conflict-of-interest disclosure. Public Draft v0.1 under Apache 2.0."
+  title: "KGB Executive Summary v0.1 — Governance Benchmark"
+  description: "KGB methodology summary — what it measures, the four behavioral dimensions, how evaluations run, reproducibility, and conflict-of-interest policy."
 aeo:
   summary: "The Kenshiki Governance Benchmark is a public, methodology-open benchmark for AI governance properties. This summary covers what it measures, methodological design, how evaluations run, reproducibility and verification, and the explicit conflict-of-interest policies."
   audience:
@@ -19,6 +19,15 @@ aeo:
     - DAG-judge ensemble
     - signed report
     - Reasoning Trace Integrity
+  faqs:
+    - question: "What is the difference between KGB-Public and KGB-Structural?"
+      answer: "KGB-Public is the behavioral half. It probes a model's reasoning under realistic open-book governance inputs and measures four first-order dimensions (EC, SAS, IF, AUC) plus a reliability profile. KGB-Structural is the artifact-audit half. It validates whether a governance payload emitted by an inference pipeline is well-formed, internally consistent, cryptographically sound, and replay-viable. Most published Index reports use both."
+    - question: "Why a categorical compliance classification instead of a numerical score?"
+      answer: "Audit benchmarks for process compliance are categorical with itemized findings (FIPS 140, Common Criteria, SOC 2). Benchmarks that publish a single floating-point score invite optimization against the score rather than the underlying property. KGB publishes a categorical classification (BEHAVIORALLY_GOVERNED / CONDITIONALLY_GOVERNED / GOVERNANCE_RISK / UNSAFE_FOR_GOVERNED_DEPLOYMENT) plus per-dimension measurements and an itemized predicate pass vector."
+    - question: "Who builds the probes?"
+      answer: "Probes are authored by an evaluations subject-matter expert with counsel review, using Kenshiki Labs' 30,000-chunk regulatory corpus (HIPAA, GDPR, EU AI Act, ISO 42001, NIST RMF, FedRAMP, state AI laws) as the origin of source material. Each probe ships with its source text inline; no model has corpus access at evaluation time."
+    - question: "Can a model vendor dispute a result?"
+      answer: "Yes. A vendor can take the published signed report, run `kgb replay` against their own direct provider API (bypassing OpenRouter), and produce a signed replay report under their own evaluator key. Both reports publish side-by-side on the leaderboard. The signing chain plus deterministic replay make this verifiable."
 datePublished: "2026-05-11"
 dateModified: "2026-05-11"
 author:

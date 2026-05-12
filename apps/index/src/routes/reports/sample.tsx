@@ -105,10 +105,36 @@ function SampleReport() {
   const aeo = deriveAeoPageModel({
     family: "sample-report",
     path: "/reports/sample",
+    frontmatter: {
+      aeo: {
+        faqs: [
+          {
+            question: "How do I verify this report's signature?",
+            answer:
+              "Run `kgb verify --report report.json`. The verifier checks the Ed25519 signature over the RFC 8785 canonical bytes, then validates each of the five attestation hashes (tool, registry, catalog, schema, judge prompt) against the published manifests at kenshikilabs.com/kgb/. Output is VALID or one of the specific INVALID_* states.",
+          },
+          {
+            question: "What is the five-hash attestation chain?",
+            answer:
+              "Every report carries five SHA-256 hashes pinning the components of the evaluation: tool_sha256 (the binary), registry_sha256 (the probe set), catalog_sha256 (the bridge type vocabulary), schema_sha256 (the methodology specs), and judge_prompt_sha256 (the DAG-judge prompt template). Plus the evaluator's signing key id and an Ed25519 signature. Any mismatch causes `kgb verify` to refuse.",
+          },
+          {
+            question: "How do I replay this report?",
+            answer:
+              "`kgb replay --report report.json` produces a fresh run against the same seeds, temperatures, probes, judges, and adapter routes the original recorded. Run it against your own provider API to bypass OpenRouter and produce a signed replay report under your own evaluator key. The pair publishes side-by-side on the leaderboard — this is the dispute-resolution mechanism.",
+          },
+          {
+            question: "What does BEHAVIORALLY_GOVERNED mean?",
+            answer:
+              "The strongest classification in the v0.1 taxonomy. Assigned when a model meets per-dimension thresholds across EC, SAS, IF, and AUC AND the reliability profile shows RS ≥ 0.85 across all four dimensions AND zero critical failure flags are raised. Lower classifications: CONDITIONALLY_GOVERNED, GOVERNANCE_RISK, UNSAFE_FOR_GOVERNED_DEPLOYMENT.",
+          },
+        ],
+      },
+    },
     defaults: {
       title: "Sample KGB report — anthropic/claude-opus-4-7",
       description:
-        "Mock KGB report illustrating the v0.1 schema: behavioral classification, four-dimension scorecard, reliability profile, regulatory mapping, judge ensemble, probe-level outcomes, run economics, and the five-hash attestation chain.",
+        "Mock KGB report illustrating the v0.1 schema — classification, four-dimension scorecard, reliability profile, judge ensemble, attestation chain.",
     },
   });
 

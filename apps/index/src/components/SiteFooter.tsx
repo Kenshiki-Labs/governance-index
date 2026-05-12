@@ -25,6 +25,9 @@ export function SiteFooter() {
           >
             Specifications
           </a>
+          <a href="/glossary" className="link link-hover">
+            Glossary
+          </a>
           <a
             href="https://github.com/Kenshiki-Labs/governance-index/blob/main/LICENSE"
             target="_blank"

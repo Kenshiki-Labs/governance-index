@@ -20,10 +20,12 @@
     "format": "biome format --write",
     "syncpack:lint": "syncpack lint",
     "syncpack:fix": "syncpack fix-mismatches && syncpack format",
+    "aeo:audit": "pnpm --filter @governance-index/index aeo:audit",
+    "aeo:generate": "pnpm --filter @governance-index/index aeo:generate",
     "py:test": "cd packages/kgb && .venv/bin/pytest",
     "py:lint": "cd packages/kgb && .venv/bin/ruff check .",
     "py:lint:fix": "cd packages/kgb && .venv/bin/ruff check --fix .",
-    "check": "pnpm syncpack:lint && pnpm lint && pnpm lint:md && pnpm typecheck",
+    "check": "pnpm syncpack:lint && pnpm lint && pnpm lint:md && pnpm typecheck && pnpm aeo:audit",
     "prepare": "husky"
   },
   "dependencies": {

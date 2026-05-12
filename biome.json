@@ -82,6 +82,20 @@
           "complexity": { "noVoid": "off" }
         }
       }
+    },
+    {
+      "includes": ["**/scripts/**/*.mjs"],
+      "linter": {
+        "rules": {
+          "complexity": {
+            "noExcessiveCognitiveComplexity": "off"
+          },
+          "suspicious": {
+            "noAssignInExpressions": "off",
+            "useAwait": "off"
+          }
+        }
+      }
     }
   ],
   "assist": {

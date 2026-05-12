@@ -3,6 +3,7 @@
  * to a complete AeoPageModel ready to be rendered into the document head.
  */
 
+import { VOCABULARY } from "../../data/vocabulary";
 import {
   AEO_FAMILIES,
   DEFAULT_OG_IMAGE,
@@ -130,6 +131,9 @@ function defaultBreadcrumbs(family: AeoFamily, path: string, title: string): Bre
   if (family === "sample-report" || family === "reports-index") {
     return [home, { name: "Sample report", path }];
   }
+  if (family === "glossary") {
+    return [home, { name: "Glossary", path: "/glossary" }];
+  }
   return [home];
 }
 
@@ -172,11 +176,37 @@ function buildSchema(ctx: SchemaContext): SchemaNode[] {
     nodes.push(reportSchema(ctx));
   }
 
+  if (ctx.family === "glossary") {
+    nodes.push(webPageSchema(ctx));
+    nodes.push(definedTermSetSchema(ctx));
+  }
+
   if (ctx.faqs.length > 0) {
     nodes.push(faqPageSchema(ctx.faqs));
   }
 
   return nodes;
+}
+
+function definedTermSetSchema(ctx: SchemaContext): SchemaNode {
+  return {
+    "@type": "DefinedTermSet",
+    "@id": `${ctx.canonical}#vocabulary`,
+    name: "Kenshiki Governance Benchmark — Vocabulary",
+    description:
+      "Canonical definitions for the KGB v0.1 governance lexicon: behavioral dimensions, judge architecture, catalog terminology, classification taxonomy.",
+    url: ctx.canonical,
+    inLanguage: "en",
+    hasDefinedTerm: VOCABULARY.map((term) => ({
+      "@type": "DefinedTerm",
+      "@id": `${ctx.canonical}#${term.anchor}`,
+      name: term.canonical,
+      alternateName: term.aliases,
+      description: term.definition,
+      inDefinedTermSet: { "@id": `${ctx.canonical}#vocabulary` },
+      url: `${ctx.canonical}#${term.anchor}`,
+    })),
+  };
 }
 
 function websiteSchema(): SchemaNode {

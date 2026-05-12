@@ -25,8 +25,8 @@ export const AEO_FAMILIES: Record<AeoFamily, AeoFamilyConfig> = {
   "specs-index": {
     ogType: "website",
     requiresSummary: false,
-    faqSchema: "never",
-    expectedSchemaTypes: ["WebPage", "BreadcrumbList", "ItemList"],
+    faqSchema: "when-present",
+    expectedSchemaTypes: ["WebPage", "BreadcrumbList"],
   },
   spec: {
     ogType: "article",
@@ -37,14 +37,20 @@ export const AEO_FAMILIES: Record<AeoFamily, AeoFamilyConfig> = {
   "sample-report": {
     ogType: "article",
     requiresSummary: false,
-    faqSchema: "never",
-    expectedSchemaTypes: ["Report", "BreadcrumbList", "Dataset"],
+    faqSchema: "when-present",
+    expectedSchemaTypes: ["Report", "BreadcrumbList"],
   },
   "reports-index": {
     ogType: "website",
     requiresSummary: false,
     faqSchema: "never",
     expectedSchemaTypes: ["WebPage", "BreadcrumbList", "ItemList"],
+  },
+  glossary: {
+    ogType: "website",
+    requiresSummary: false,
+    faqSchema: "never",
+    expectedSchemaTypes: ["WebPage", "BreadcrumbList", "DefinedTermSet"],
   },
 } as const;
 

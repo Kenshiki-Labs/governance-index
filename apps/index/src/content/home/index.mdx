@@ -1,7 +1,7 @@
 ---
 seo:
   title: "The Governance Benchmark — Kenshiki Labs"
-  description: "The public benchmark for AI governance properties. Continuously-updated leaderboard scoring frontier model APIs across Evidence Confinement, Source Attribution Stability, Instruction Fidelity, and Abstention Calibration."
+  description: "The open-source benchmark for AI governance. Continuously-updated leaderboard scoring frontier models on four behavioral dimensions. Apache 2.0."
 aeo:
   summary: "The Kenshiki Governance Benchmark (KGB) is the public yardstick for whether an AI model's reasoning can be governed. Open methodology, open-source runner, cryptographically signed reports, continuously-updated leaderboard."
   audience:
@@ -19,6 +19,17 @@ aeo:
     - Reasoning Trace Integrity
     - DAG-judge ensemble
     - signed governance report
+  faqs:
+    - question: "What does the Governance Benchmark measure?"
+      answer: "Four first-order behavioral dimensions of an AI model under realistic open-book governance inputs: Evidence Confinement (does it stay within the source material it was given?), Source Attribution Stability (does it cite the right sources, stably?), Instruction Fidelity (does it follow the open-book instruction?), and Abstention/Uncertainty Calibration (does it decline when the evidence doesn't support an answer?). Plus a cross-cutting reliability profile and a structural audit of any governance payload the model emits."
+    - question: "Is the benchmark open source?"
+      answer: "Yes. The methodology, the reference runner, and the probe registry are all published under Apache 2.0. Reports are cryptographically signed and verifiable by any third party using the open-source `kgb verify` command. Anyone can re-run the exact published seeds against any model API and produce a signed replay report."
+    - question: "Who runs the leaderboard?"
+      answer: "Kenshiki Labs publishes and operates the public Index. Crucially, Kenshiki Labs is not the judge of any single evaluation — the judge ensemble is external (two pinned frontier models from different provider families, plus a human-annotator calibration sample). Anti-conflict routing prevents a judge from scoring its own provider family. When Kenshiki's own runtime product enters the Index, results require third-party replay confirmation before publication."
+    - question: "How is the benchmark different from MMLU or HaluEval?"
+      answer: "MMLU measures capability. HaluEval, FACTS Grounding, and SimpleQA measure factuality. KGB measures process properties — whether the model's reasoning can be governed. It is to AI governance what HaluEval is to factuality: a public, methodology-open, continuously-published yardstick the industry can argue about."
+    - question: "Is a KGB report a compliance certificate?"
+      answer: "No. A KGB report is evidence that can support a compliance audit. It measures process properties under a specific probe suite. It is not itself a regulatory filing or a certification by any standards body. Vendors using KGB reports to support regulatory submissions remain responsible for the underlying compliance."
 datePublished: "2026-05-11"
 dateModified: "2026-05-11"
 ---

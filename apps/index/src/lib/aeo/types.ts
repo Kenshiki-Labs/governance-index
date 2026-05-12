@@ -7,7 +7,13 @@
  * four surfaces governance-index ships in v0.1.
  */
 
-export type AeoFamily = "home" | "specs-index" | "spec" | "sample-report" | "reports-index";
+export type AeoFamily =
+  | "home"
+  | "specs-index"
+  | "spec"
+  | "sample-report"
+  | "reports-index"
+  | "glossary";
 
 export type SchemaNode = Record<string, unknown>;
 

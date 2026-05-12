@@ -1,7 +1,7 @@
 ---
 seo:
   title: "KGB-Structural v0.1 — Artifact Audit Methodology"
-  description: "The artifact-audit methodology for the Kenshiki Governance Benchmark. Specifies the formal predicate schema for governance payloads — five hard gates, four predicate classes, the categorical compliance taxonomy, and a self-auditing report format."
+  description: "The KGB artifact-audit methodology — predicate schema for governance payloads, five hard gates, four predicate classes, categorical compliance taxonomy."
 aeo:
   summary: "KGB-Structural is the artifact-audit half of the Kenshiki Governance Benchmark. It defines a machine-executable evaluation system for governance payloads emitted by inference pipelines: well-formedness, internal consistency, cryptographic soundness, and replay viability. Output is categorical, not a numerical score."
   audience:
@@ -20,6 +20,15 @@ aeo:
     - chain of custody
     - replay viability
     - REJECTED INCOMPLETE STRUCTURALLY_COMPLETE
+  faqs:
+    - question: "What is a governance payload?"
+      answer: "A structured JSON record emitted at the conclusion of a governed inference turn. It contains all stage attestations (contract classification, evidence retrieval, prompt construction, inference completion, verification, access decision), the evidence boundary, the access decision, and session linkage. KGB-Structural evaluates whether this payload is well-formed and replay-viable — not whether the completion is factually correct."
+    - question: "What are the five hard gates?"
+      answer: "Hard gates are binary predicates whose failure designates the payload as INCOMPLETE regardless of how the rest of the predicate matrix resolves. They cover canonical JSON conformance, signature validity, chain integrity, evidence-boundary soundness, and access-decision authority. Section 4 of the specification enumerates each and its failure semantics."
+    - question: "Why categorical compliance instead of a single numerical score?"
+      answer: "Audit benchmarks for process compliance are categorical with itemized findings — FIPS 140, Common Criteria, SOC 2 opinions, MITRE ATT&CK coverage matrices. Benchmarks that publish a floating-point aggregate invite optimization against the score rather than the property the benchmark exists to detect. KGB-Structural publishes REJECTED / INCOMPLETE / STRUCTURALLY_INCOMPLETE / STRUCTURALLY_COMPLETE plus an itemized predicate pass vector."
+    - question: "What does replay_viable mean?"
+      answer: "A binary flag orthogonal to compliance status. A payload is replay_viable when its recorded seeds, temperatures, prompt hashes, and evidence boundary are sufficient to deterministically reproduce the inference. Replay viability is a prerequisite for the deterministic-replay dispute-resolution mechanism in KGB Tool §3.3."
 datePublished: "2026-05-11"
 dateModified: "2026-05-11"
 author:

@@ -9,7 +9,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "aeo:generate": "node scripts/generate-aeo-artifacts.mjs"
+    "aeo:generate": "node scripts/generate-aeo-artifacts.mjs",
+    "aeo:audit": "node scripts/aeo-audit.mjs"
   },
   "dependencies": {
     "@mdx-js/rollup": "^3.1.0",

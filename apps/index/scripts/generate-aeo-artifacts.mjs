@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 /**
- * Generates the three static AEO artifacts the Governance Benchmark site
+ * Generates the four static AEO artifacts the Governance Benchmark site
  * publishes:
- *   - public/robots.txt   — crawl directives with explicit AI-crawler allow
- *   - public/sitemap.xml  — every known route with lastmod
- *   - public/llms.txt     — AI-discovery index (Anthropic-proposed format)
+ *   - public/robots.txt    — crawl directives with explicit AI-crawler allow
+ *   - public/sitemap.xml   — every known route with lastmod
+ *   - public/llms.txt      — AI-discovery index (Anthropic-proposed format)
+ *   - public/llms-full.txt — full content dump of the four methodology specs
  *
  * Invoked by `pnpm build` via the prebuild script. Output is checked into
  * apps/index/public/ so it's available for the dev server too.
@@ -13,7 +14,7 @@
  * add it here and re-run `pnpm aeo:generate`.
  */
 
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -73,6 +74,14 @@ const ROUTES = [
     title: "Sample KGB report",
     description:
       "Realistic mock of a v0.1 signed report — classification, scorecard, attestation chain, replay command.",
+    priority: "0.7",
+    changefreq: "monthly",
+  },
+  {
+    path: "/glossary",
+    title: "Glossary",
+    description:
+      "Canonical definitions for the KGB v0.1 governance lexicon — behavioral dimensions, judge architecture, catalog terminology, classification taxonomy.",
     priority: "0.7",
     changefreq: "monthly",
   },
@@ -160,11 +169,15 @@ function generateLlmsTxt() {
   const reports = ROUTES.filter((r) => r.path.startsWith("/reports/"));
   const top = ROUTES.find((r) => r.path === "/");
   const specsIndex = ROUTES.find((r) => r.path === "/specs");
+  const glossary = ROUTES.find((r) => r.path === "/glossary");
 
   const topLevelEntries = [
     ...(top ? [`- [${top.title}](${SITE_ORIGIN}${top.path}): ${top.description}`] : []),
     ...(specsIndex
       ? [`- [${specsIndex.title}](${SITE_ORIGIN}${specsIndex.path}): ${specsIndex.description}`]
+      : []),
+    ...(glossary
+      ? [`- [${glossary.title}](${SITE_ORIGIN}${glossary.path}): ${glossary.description}`]
       : []),
   ];
 
@@ -195,11 +208,78 @@ function generateLlmsTxt() {
   return `${lines.join("\n")}\n`;
 }
 
+/** llms-full.txt — full markdown dump of the four methodology specs.
+ *
+ * AI crawlers and on-demand fetchers that want to ingest the entire
+ * methodology in a single request hit this file instead of crawling the
+ * /specs/* routes individually. We strip YAML frontmatter and the
+ * Markdown horizontal rules immediately following frontmatter so the
+ * stream reads as continuous content.
+ *
+ * Source: docs/specs/*.mdx — same files the site renders. The dump is
+ * the canonical text, not a paraphrase. */
+function generateLlmsFullTxt(specsDir) {
+  const specs = [
+    {
+      file: "exec-summary.mdx",
+      heading: "## Executive Summary",
+    },
+    {
+      file: "kgb-public.mdx",
+      heading: "## KGB-Public — Behavioral Methodology",
+    },
+    {
+      file: "kgb-structural.mdx",
+      heading: "## KGB-Structural — Artifact Audit Methodology",
+    },
+    {
+      file: "kgb-tool.mdx",
+      heading: "## KGB Tool — Engineering Reference",
+    },
+  ];
+
+  const header = [
+    "# Kenshiki Governance Benchmark — Full Methodology",
+    "",
+    `> Continuous dump of the four KGB v0.1 methodology specifications. Apache 2.0. Generated ${TODAY_ISO}.`,
+    "",
+    `> Source: https://github.com/Kenshiki-Labs/governance-index/tree/main/docs/specs`,
+    "",
+    `> Site: ${SITE_ORIGIN}/`,
+    "",
+    "---",
+    "",
+  ];
+
+  const body = specs.map((spec) => {
+    const raw = readFileSync(resolve(specsDir, spec.file), "utf8");
+    const stripped = stripFrontmatter(raw);
+    return [spec.heading, "", stripped.trim(), "", "---", ""].join("\n");
+  });
+
+  return `${header.concat(body).join("\n")}\n`;
+}
+
+/** Strip YAML frontmatter (`---\n...\n---`) from the top of an MDX file
+ * and return only the prose body. */
+function stripFrontmatter(raw) {
+  if (!raw.startsWith("---")) {
+    return raw;
+  }
+  const closingIndex = raw.indexOf("\n---", 3);
+  if (closingIndex === -1) {
+    return raw;
+  }
+  return raw.slice(closingIndex + 4).replace(/^\s*\n/, "");
+}
+
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const PUBLIC_DIR = resolve(__dirname, "..", "public");
+const SPECS_DIR = resolve(__dirname, "..", "..", "..", "docs", "specs");
 
 writeFileSync(resolve(PUBLIC_DIR, "robots.txt"), generateRobotsTxt());
 writeFileSync(resolve(PUBLIC_DIR, "sitemap.xml"), generateSitemapXml());
 writeFileSync(resolve(PUBLIC_DIR, "llms.txt"), generateLlmsTxt());
+writeFileSync(resolve(PUBLIC_DIR, "llms-full.txt"), generateLlmsFullTxt(SPECS_DIR));
 
-console.log(`✓ wrote robots.txt, sitemap.xml, llms.txt to ${PUBLIC_DIR}`);
+console.log(`✓ wrote robots.txt, sitemap.xml, llms.txt, llms-full.txt to ${PUBLIC_DIR}`);

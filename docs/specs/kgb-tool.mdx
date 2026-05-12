@@ -1,7 +1,7 @@
 ---
 seo:
   title: "KGB Tool v0.1 — Engineering Reference"
-  description: "The engineering reference for the Kenshiki Governance Benchmark runner: tool architecture, OpenRouter adapter, multi-judge ensemble, signing chain, leaderboard governance, canonical DAG-judge prompt template, and worked bridge + probe artifacts."
+  description: "The KGB engineering reference — runner architecture, OpenRouter adapter, multi-judge ensemble, signing chain, DAG-judge prompt template, worked artifacts."
 aeo:
   summary: "The KGB Tool specification is the engineering reference for implementing the Kenshiki Governance Benchmark. Covers runner architecture, OpenRouter-as-primary adapter, multi-judge DAG-compiling ensemble, Catalog Registry of bridge types, signing chain, attestation, public leaderboard governance, and the canonical prompt template + canonical bridge + canonical probe in Appendices A–C."
   audience:
@@ -21,6 +21,15 @@ aeo:
     - Ed25519 signing
     - probe registry
     - reproducible builds
+  faqs:
+    - question: "Why OpenRouter as the canonical adapter?"
+      answer: "OpenRouter is a unified gateway proxying ~300 frontier and open-weight models through a single OpenAI-compatible API. Using it as primary trades one engineering simplification (one adapter, one API key for end users, fast support for new model releases) for one indirection in the attestation chain. Vendors disputing a result can re-run the exact published seeds against their direct provider API via dispute-resolution shim adapters and produce a signed replay report."
+    - question: "How is a signed report verified?"
+      answer: "Run `kgb verify --report report.json`. Verification is local once the published key registry, build manifest, and registry hash list have been fetched. The verifier checks the Ed25519 signature over the RFC 8785 canonical bytes, then validates each of the five attestation hashes (tool, registry, catalog, schema, judge prompt) against the published manifests. Output is VALID or one of the specific INVALID_* states."
+    - question: "What is deterministic replay?"
+      answer: "Every report records the exact seeds, temperatures, probe IDs, judge identities, and adapter routes used. `kgb replay --report prior.json` produces a fresh run against the same configuration. If the replay matches the original (modulo measured provider non-determinism, itself a published reliability dimension), the report is corroborated. This is the dispute-resolution mechanism."
+    - question: "Where do bridge types come from?"
+      answer: "The Catalog Registry of bridge types is operator-authored, counsel-reviewed, signed, and versioned alongside the probe registry. v0.1 ships with seven classes (statutory classification, regulatory mapping, definitional inference, scope-of-application, exception handling, temporal validity, cross-jurisdictional). Each bridge carries critical questions to discharge, declared defeaters to evaluate, and a burden rule. Appendix B contains a worked example."
 datePublished: "2026-05-11"
 dateModified: "2026-05-11"
 author:

@@ -1,7 +1,7 @@
 ---
 seo:
-  title: "KGB-Public v0.1 — Behavioral Governance Methodology"
-  description: "The behavioral probe methodology for the Kenshiki Governance Benchmark. Specifies the four first-order dimensions (EC, SAS, IF, AUC), the reliability profile, the multi-judge ensemble, calibration policy, and regulatory mapping."
+  title: "KGB-Public v0.1 — Behavioral Methodology"
+  description: "The KGB behavioral methodology — four first-order dimensions (EC, SAS, IF, AUC), multi-judge ensemble, calibration, and regulatory framework mapping."
 aeo:
   summary: "KGB-Public is the behavioral half of the Kenshiki Governance Benchmark. It specifies how to probe a model's reasoning across Evidence Confinement, Source Attribution Stability, Instruction Fidelity, and Abstention/Uncertainty Calibration — including the multi-judge ensemble, anti-conflict routing, human-annotator calibration, and per-framework regulatory mapping."
   audience:
@@ -22,6 +22,15 @@ aeo:
     - EU AI Act
     - HIPAA
     - ISO 42001
+  faqs:
+    - question: "What are the four first-order behavioral dimensions?"
+      answer: "Evidence Confinement (EC) measures whether claims stay anchored to provided source material. Source Attribution Stability (SAS) measures whether citations remain stable across paraphrased queries and shift correctly when evidence changes. Instruction Fidelity (IF) measures resistance to scope override, authority escalation, injection-via-EC, confidentiality breach, and persona override. Abstention/Uncertainty Calibration (AUC) measures whether the model declines when evidence is insufficient and commits when evidence supports an answer."
+    - question: "Why a multi-judge ensemble instead of a single LLM-as-judge?"
+      answer: "Single-judge scoring inherits the judge's biases and idiosyncrasies. KGB v0.1 uses two pinned external frontier judges from different provider families. Inter-judge Cohen's kappa is computed per dimension and published with every report. Dimensions with κ below 0.80 are flagged EVALUATOR_UNRELIABLE and excluded from the headline classification regardless of point measurement."
+    - question: "What is anti-conflict routing?"
+      answer: "The rule that prevents a judge from scoring a target model from its own provider family. If the target is openai/gpt-4-turbo and the primary judge is openai/gpt-4o, the secondary judge handles that row. Per-row judge identity is recorded in every signed report. The mechanism is auditable; the count of anti-conflict swaps is published in the report."
+    - question: "How does KGB-Public map to regulatory frameworks?"
+      answer: "Section 7 of the specification publishes per-framework status derivation (EU AI Act Articles 13/14, HIPAA, ISO 42001, NIST AI RMF, GDPR) from the behavioral measurements. Status is verified / partial / cannot_verify per framework. A KGB report is evidence that can support a compliance audit; it is not itself a regulatory certification."
 datePublished: "2026-05-11"
 dateModified: "2026-05-11"
 author:
