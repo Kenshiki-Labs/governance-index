@@ -1,0 +1,23 @@
+{
+  "$schema": "https://unpkg.com/syncpack@14/dist/schema.json",
+  "indent": "  ",
+  "sortFirst": [
+    "name",
+    "description",
+    "version",
+    "private",
+    "type",
+    "packageManager",
+    "scripts",
+    "dependencies",
+    "devDependencies",
+    "peerDependencies"
+  ],
+  "versionGroups": [
+    {
+      "label": "Pin React across the workspace",
+      "dependencies": ["react", "react-dom", "@types/react", "@types/react-dom"],
+      "policy": "sameRange"
+    }
+  ]
+}

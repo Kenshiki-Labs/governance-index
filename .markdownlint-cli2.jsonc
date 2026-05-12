@@ -1,0 +1,21 @@
+{
+  "config": {
+    "MD013": false,
+    "MD033": {
+      "allowed_elements": ["div", "img", "br", "sub", "sup", "details", "summary"]
+    },
+    "MD041": false,
+    "MD036": false,
+    "MD024": {
+      "siblings_only": true
+    }
+  },
+  "ignores": [
+    "node_modules/**",
+    "**/dist/**",
+    "**/.output/**",
+    "packages/kgb/.venv/**",
+    "**/routeTree.gen.ts",
+    "docs/specs/**"
+  ]
+}

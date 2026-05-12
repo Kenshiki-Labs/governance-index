@@ -1,0 +1,113 @@
+# Kenshiki Governance Benchmark (KGB)
+
+**Executive Summary — v0.1**
+
+May 2026 · Public Draft v0.1 · Companion to KGB-Structural, KGB-Public, and KGB Tool specifications
+
+---
+
+## What this is
+
+The Kenshiki Governance Benchmark is a public, methodology-open benchmark for AI governance properties. It measures whether a model's reasoning can be governed — whether it stays within evidence, attributes correctly, follows instructions, and abstains when it should.
+
+It exists because AI governance has no shared yardstick. Hallucination has HaluEval, FACTS Grounding, SimpleQA. Capability has MMLU and HELM. Governance has procurement RFPs and vendor self-attestation. Procurement teams ask vendors "does your model stay within evidence?" and get marketing answers. Regulators ask "is this model auditable?" and get principles documents.
+
+KGB closes that gap with four published artifacts:
+
+- **KGB-Structural** — audits whether a model emits a verifiable governance payload (canonical JSON, signed, attestable).
+- **KGB-Public** — probes whether a model behaves as governed under realistic open-book inputs across four first-order dimensions.
+- **The reference runner (`kgb`)** — open-source Python tool implementing the methodology. Apache 2.0. Reproducibly built. Reports are Ed25519-signed and verifiable by any third party.
+- **The Index** at `index.kenshikilabs.com` — a continuously-updated public leaderboard scoring frontier model APIs. Free to read. Free to verify. Free to re-run.
+
+## What it measures
+
+Four first-order behavioral dimensions, evaluated through open-book probes that carry inline regulatory source material:
+
+| Dimension | What it measures |
+| --------- | ---------------- |
+| **Evidence Confinement (EC)** | Does the model stay within the source material provided in the prompt? |
+| **Source Attribution Stability (SAS)** | Does it cite the right sources, the same way, across paraphrased asks? |
+| **Instruction Fidelity (IF)** | Does it follow the open-book instruction even when training data could support an unprovided answer? |
+| **Abstention/Uncertainty Calibration (AUC)** | Does it decline when the provided evidence does not support an answer? |
+
+Plus a structural audit of any governance payload the model emits (KGB-Structural) and a cross-cutting reliability profile measuring response stability, temperature sensitivity, calibration agreement, and prompt sensitivity over all four dimensions.
+
+## Components
+
+Beyond the standard probe-and-score pattern, KGB has three component layers worth describing explicitly.
+
+**The Catalog Registry of bridge types** is a versioned, signed vocabulary of typed governance inferences — statutory classification, regulatory mapping, definitional inference, scope-of-application, exception handling, temporal validity, cross-jurisdictional. Each bridge type carries critical questions that must be discharged, declared defeaters that must be evaluated, and a burden rule. Probes pin specific bridges in their expectations; the catalog is what the judge ensemble compiles against.
+
+**The DAG-judge output schema** specifies what each judge in the ensemble produces. Judges do not emit a free-form rubric score; they compile the target model's response into a typed proof graph of facts, claims, and bridges, following the Reasoning Trace Integrity architecture (Foley, 2026 SSRN). The graph is the load-bearing artifact for scoring, which means inter-judge agreement is measurable per-node and per-edge rather than collapsed into an opaque aggregate. The full prompt template, JSON output schema, and worked example are in KGB Tool Appendix A.
+
+**The corpus-origin probe pipeline** authors probes from a 30K-chunk corpus of statutory and regulatory material — HIPAA, GDPR, EU AI Act, ISO 42001, NIST RMF, FedRAMP, state AI laws. Each probe ships with its source text inline in the prompt; no model has corpus access at evaluation time, including Kenshiki Labs' own. The corpus is the origin of source units, not a retrieval substrate at evaluation time. The full authoring pipeline is in KGB Tool §3.9.
+
+## How an evaluation runs
+
+A KGB run is a chain of typed artifacts, each pinned by SHA-256:
+
+1. **Probe** — carries inline regulatory source material and a question, plus the bridge type(s) the response is expected to use.
+2. **Target model** — reached through OpenRouter as the canonical adapter; direct-provider shims exist for dispute-resolution replay.
+3. **Judge ensemble** — two pinned external frontier judges from different provider families compile the response into a typed proof graph. Anti-conflict routing prevents a judge from scoring its own provider family. Cohen's κ between primary and secondary is reported per dimension; dimensions with κ &lt; 0.80 are flagged `EVALUATOR_UNRELIABLE` and excluded from the headline classification regardless of point measurement.
+4. **Signed report** — five-hash attestation chain (tool, probe registry, bridge catalog, schema, evaluator) plus Ed25519 signature over RFC 8785 canonical bytes.
+
+Standard-mode evaluation runs ~510 probes against one model in ~5–8 minutes wall-clock for ~$30–60 in API costs. A `quick` smoke-test mode and a `full` mode (with the expanded held-out probe set) are also defined.
+
+## Reproducibility and verification
+
+Three properties together make published scores meaningful to third parties:
+
+- **Reproducible builds.** The Python tool builds deterministically — same source + same lock file + same toolchain → byte-identical binary → matching `tool_sha256`. A third party with the canonical source can produce a binary that matches the published hash exactly.
+- **Pinned probe registry and bridge catalog.** Both are versioned Merkle trees with single signed roots (`registry_sha256`, `catalog_sha256`). A mismatch anywhere aborts the run before any model is called.
+- **Deterministic replay.** Every report records the exact seeds, temperatures, probe IDs, judge identities, and adapter routes used. `kgb replay --report prior.json` produces a fresh run against the same configuration; if the replay matches the original (modulo measured provider non-determinism, which is itself a published reliability dimension), the report is corroborated.
+
+Vendor dispute resolution works through the same mechanism. A model vendor disputing a result can take the published report, run `kgb replay` against their own direct provider API (bypassing OpenRouter), and produce a signed replay report under their own evaluator key. Both reports publish side-by-side on the leaderboard.
+
+## Conflict of interest
+
+Kenshiki Labs authors the KGB methodology and curates the probe registry. This is the same conflict every benchmark publisher carries — HaluEval, MMLU, FACTS Grounding, SimpleQA are all authored by interested parties. KGB manages the conflict by being explicit about it:
+
+- **Kenshiki Labs is not the judge of any single evaluation.** The judge ensemble is external — two pinned frontier models from different provider families, plus a human-annotator calibration sample for pre-publication validation.
+- **No judge scores its own provider family.** Anti-conflict routing is recorded in every report.
+- **Vendor right-of-reply.** Vendors receive 14 days notice before any new evaluation of their model is published and 7 days pre-publication access to the signed report. Vendors may publish a written response of ≤500 words alongside the report. Vendors may not embargo publication, alter probe content, or require pre-clearance of methodology.
+- **Kenshiki product results held to a higher bar.** When Kenshiki's own runtime product enters the Index, results require at least one third-party-operator signed replay before publication; published scores are the lower of the two when they disagree.
+- **Annual external validation.** Kenshiki commissions an academic or auditing group to re-run the full Index using independent infrastructure and judge configurations. Divergence above ±0.05 on any dimension triggers methodology review.
+- **No pay-to-delay.** Kenshiki does not accept funding from model vendors in exchange for delayed publication, removed reports, or altered methodology.
+
+## Legal posture
+
+KGB measures process properties (does the model stay confined, does it cite truthfully, does it abstain calibratedly). It does not claim "Model X is better than Model Y at law" or "Model X is unsafe." Published reports state findings as measured properties of the model's behavior on the probe set, not as conclusions about the model. A KGB report is evidence that can support a compliance audit; it is not itself a regulatory filing or certification.
+
+## Versioning
+
+KGB specifications version independently from the runner.
+
+- **Major versions** (v1.0+) — methodology stable; any published report can be replayed and verified indefinitely.
+- **Minor versions** (v0.2, v0.3) — additive probes, additional bridge classes in the Catalog Registry, expanded regulatory mappings. Old reports remain valid within their version.
+- **Patch versions** (v0.1.x) — clarifications, errata, typos.
+
+v0.1 public launch is targeted for Q3 2026. Until then, this document and its three companion specifications are published as public drafts open to methodological critique. Issues and discussion land on GitHub once the repository accepts public contribution; confidential methodology-defect reports (e.g., gaming vectors that should be addressed before public disclosure) can be sent privately to `methodology@kenshikilabs.com`.
+
+## Patent and prior-art notice
+
+KGB's judge architecture uses the architectural pattern from Kenshiki Labs' Reasoning Trace Integrity work (Foley, 2026 SSRN) — candidate → typed graph → kernel verification → artifact-or-refusal — under an explicit Apache 2.0 grant for benchmark use. KGB does not practice the methods of Kenshiki Labs' provisional patent application *Deterministic Inference Compiler* (2026), which are scoped to runtime governance products. Third-party operators running KGB do not practice the patent. Third parties building runtime governance products on top of the benchmark's architectural pattern do, and require a separate license.
+
+## How to cite
+
+```bibtex
+@misc{kgb-spec-v01-2026,
+  title  = {Kenshiki Governance Benchmark — Specifications v0.1},
+  author = {Kenshiki Labs},
+  year   = {2026},
+  url    = {https://github.com/Kenshiki-Labs/governance-index/tree/main/docs/specs},
+  note   = {Public Draft v0.1, Apache 2.0}
+}
+```
+
+When citing specific findings, reference the full report ID and runner version; reports embed their `tool_sha256` and `registry_sha256` for unambiguous identification.
+
+---
+
+**Document control:** Public Draft v0.1 — methodology specification published openly under Apache 2.0.
+Companion specs: KGB-Structural v0.1, KGB-Public v0.1, KGB Tool v0.1.
+Owner: Kenshiki Labs.

@@ -1,0 +1,792 @@
+# Kenshiki Governance Benchmark Specification
+
+## Formal Predicate Schema for Runtime AI Governance Artifact Evaluation
+
+**Version:** 0.1  
+**Status:** Public Draft — open methodology specification  
+**License:** Apache 2.0  
+**Authors:** Kenshiki Labs  
+**Date:** May 2026
+
+---
+
+## 1. Purpose and Scope
+
+This document defines the formal specification for the Kenshiki Governance Benchmark (KGB) — a machine-executable evaluation system for runtime AI governance artifacts produced by inference pipelines operating in consequential decision environments.
+
+The benchmark tests **process properties**, not output properties. It does not evaluate whether a model's completion is factually correct. It evaluates whether the artifact produced by the inference pipeline is well-formed, internally consistent, cryptographically sound, and sufficient to support independent forensic reconstruction of the execution.
+
+The target artifact is a **governance payload** — the structured record emitted at the conclusion of a governed inference turn, including all stage attestations, evidence boundaries, access decisions, and chain linkages. The reference artifact for this specification is the Goober inference payload schema at envelope version 2.
+
+The benchmark produces:
+
+- a **categorical compliance designation** (REJECTED, INCOMPLETE, STRUCTURALLY_INCOMPLETE, STRUCTURALLY_COMPLETE),
+- a **per-class predicate pass vector**,
+- a **per-stage coverage diagnostic**,
+- an **itemized remediation list**, and
+- a **binary `replay_viable` flag** orthogonal to status.
+
+It does **not** produce an aggregate numerical score. The discipline is intentional: aggregating predicate results into a single number reintroduces the false-precision failure mode the benchmark exists to detect in evaluated systems. Audit benchmarks for process compliance are categorical with itemized findings (FIPS 140, Common Criteria, SOC 2 opinions, MITRE ATT&CK coverage matrices); benchmarks that publish floats invite optimization against the score rather than the property.
+
+The benchmark is designed to be:
+
+- **Deterministic** — two independent evaluators produce identical results against identical payloads, under the canonicalization rules in section 2
+- **Falsifiable** — every predicate is independently evaluable from the artifact alone
+- **Vendor-neutral** — defined against an open payload schema, not against Kenshiki internals
+- **Actionable** — every failing predicate maps to a specific remediation in the engineering backlog
+- **Self-auditing** — the benchmark's own output is a signed governance artifact (section 10.6)
+
+---
+
+## 2. Definitions
+
+**Payload (P):** The complete JSON artifact emitted at the conclusion of a governed inference turn. Includes the attestation envelope, stage records, evidence boundary, access decision, and session linkage.
+
+**Canonical JSON Serialization:** UTF-8-encoded JSON with lexicographically sorted object keys, no insignificant whitespace, and numeric values in shortest unambiguous form, per RFC 8785 (JSON Canonicalization Scheme). All hash predicates compute SHA-256 over this canonicalization. Two evaluators producing identical canonical bytes for the same logical value is the prerequisite for the determinism property claimed in section 1.
+
+**Governance Record (G):** The typed, parsed representation of P after schema validation. Evaluation operates on G, not P directly.
+
+**Turn:** A single request-response cycle within a session. A session contains one or more turns.
+
+**Stage Row:** A ledger record for a single pipeline stage within a turn. Stages are ordered: `contract.classified → evidence.retrieved → prompt.constructed → inference.completed → verification.completed → access.decided`.
+
+**Row Hash:** The SHA-256 of the canonical JSON serialization of a stage row, excluding the `row_hash` field itself.
+
+**Prior Hash:** The `row_hash` of the immediately preceding stage row in the chain. For the first stage of the first turn in a session, `prior_hash` is the empty string by convention.
+
+The chain construction follows the authenticated append-only log model used in Certificate Transparency (RFC 6962) and tamper-evident log literature: each row's hash incorporates the preceding row's hash, producing a structure isomorphic to a Merkle chain with sequential leaf ordering. Inclusion proofs are O(log n) when extended to a Merkle tree over batched chains, and the root can be externally anchored to a trusted witness. KGB v0.1 specifies adjacency and field equality only; external anchoring is out of scope for this version (see section 11).
+
+**Hard Gate:** A binary predicate whose failure designates the payload as INCOMPLETE regardless of how the remaining predicate matrix resolves.
+
+**Predicate:** A function `Pᵢ(G) → {pass, fail, warn}` evaluated against the governance record.
+
+**Coverage Vector:** The per-stage pass rate across all predicates scoped to that stage.
+
+**SIRE Tag:** A Structured Identity Registry Entity tag — the canonical identity record linking a retrieved evidence unit to its authoritative entry in the governance corpus registry.
+
+**SOP Tuple:** A Subject-Object-Predicate tuple extracted from a source evidence unit or completion, used for structural entailment verification.
+
+**ReBAC:** Relationship-Based Access Control. The authorization layer that determines which corpus resources a given tenant-user binding may access.
+
+---
+
+## 3. Payload Schema
+
+The governance payload is a typed record with the following top-level structure. All fields are required unless marked optional.
+
+### 3.1 Top-Level Envelope
+
+```
+GovernancePayload {
+  envelope_version:   string          -- "2" currently; must be semver-comparable
+  request_id:         uuid            -- unique per turn
+  session_id:         uuid            -- shared across turns in a session
+  turn_index:         integer ≥ 1     -- 1-based position within session
+  timestamp:          iso8601         -- turn completion time
+  prior_hash:         string          -- row_hash of preceding turn's access.decided row
+  chain_status:       enum            -- "complete" | "partial" | "broken"
+  policy:             PolicyBlock
+  query_sha256:       hex64           -- SHA-256 of the user query text
+  stage_hashes:       StageHashMap    -- map of stage name → row_hash
+  completion_attestation: CompletionAttestation
+  gate_attestation:   GateAttestation
+  evidence_boundary:  EvidenceBoundary
+  tuple_gate:         TupleGate
+  access_decision:    AccessDecision
+  sufficiency:        SufficiencyBlock
+}
+```
+
+### 3.2 PolicyBlock
+
+```
+PolicyBlock {
+  mode:                   enum        -- "governed" | "ungoverned"
+  evidence_match:         boolean
+  source_ids:             [string]    -- corpus source identifiers in scope
+  corpus_version_hash:    hex         -- SHA-256 of corpus version manifest
+}
+```
+
+### 3.3 CompletionAttestation
+
+```
+CompletionAttestation {
+  completion_text:        string      -- full completion as returned to caller
+  completion_hash:        hex64       -- SHA-256 of completion_text
+  completion_tokens:      integer
+  algorithm:              string      -- "sha256-hmac-v1"
+  key_id:                 string      -- non-empty identifier of signing key
+  signature:              hex         -- HMAC signature
+  seed:                   integer     -- inference seed; deterministic from request_id
+  model_id:               string      -- fully qualified model identifier
+  model_version:          string      -- commit SHA or registry tag
+  temperature:            float [0,2]
+  top_p:                  float [0,1]
+  max_tokens:             integer
+  system_prompt_text:     string      -- full system prompt as sent
+  system_prompt_hash:     hex64       -- SHA-256 of system_prompt_text
+  assembled_prompt_hash:  hex64       -- SHA-256 of complete assembled prompt
+  ra_hash:                string      -- remote attestation hash or "not_applicable"
+  ra_mode:                string      -- "tee" | "standard_compute" | "not_applicable"
+  ca_hash:                hex64       -- hash of preceding chain anchor
+  source_id:              string      -- primary evidence source
+  timestamp:              iso8601
+  chain_status:           enum        -- "complete" | "partial" | "broken"
+  prior_hash:             string      -- row_hash of prompt.constructed stage row
+  governance:             GovernanceBlock
+}
+```
+
+### 3.4 GateAttestation
+
+```
+GateAttestation {
+  disposition:              enum      -- "entailed" | "partial" | "unsupported"
+  entailment_score:         float [0,1]
+  overlap_score:            float [0,1]
+  algorithm:                string
+  key_id:                   string   -- non-empty
+  signature:                hex
+  ga_hash:                  hex64
+  ca_hash:                  hex64
+  claim_hash:               hex64    -- must equal completion_attestation.completion_hash
+  evidence_hash:            hex64    -- hash of promoted evidence unit set
+  evidence_units_hash:      hex64    -- hash of evidence SOP tuple set
+  tuple_overlap_hash:       hex64    -- hash of matched (evidence, completion) tuple pairs
+  entailment_claims_hash:   hex64    -- hash of completion SOP tuple set
+  reasoning_hash:           string   -- hash of reasoning trace or ""
+  gate_id:                  string
+  gate_version:             string
+  appeal_depth:             integer ≥ 0
+  prior_gate_hash:          string | null
+  source_id:                string
+  timestamp:                iso8601
+  chain_status:             enum
+  prior_hash:               string   -- row_hash of inference.completed stage row
+}
+```
+
+### 3.5 EvidenceBoundary
+
+```
+EvidenceBoundary {
+  retrieved_unit_count:   integer     -- total units returned by retrieval
+  prompt_unit_count:      integer     -- units promoted to context window
+  sire_unresolved_count:  integer     -- promoted units without SIRE resolution
+  evidence_units:         [EvidenceUnit]  -- full list of ALL retrieved units
+}
+
+EvidenceUnit {
+  unit_id:          string            -- corpus:chunk_id
+  source_id:        string
+  sire_tag:         SIRETag | null    -- null only if sire_unresolved: true
+  sire_unresolved:  boolean
+  text:             string            -- full chunk text
+  score:            float
+  rank:             integer           -- position in retrieval result set
+  unit_type:        string
+  authority_tier:   enum              -- "binding" | "guidance" | "informational"
+  promoted:         boolean           -- true for the prompt_unit_count subset
+}
+
+SIRETag {
+  canonical_id:     string
+  entity_type:      string
+  lineage_hash:     hex64
+  corpus_version:   string
+  resolution_path:  string
+}
+```
+
+### 3.6 TupleGate
+
+```
+TupleGate {
+  skipped:              boolean       -- must be false in production
+  skip_reason:          string | null -- null if not skipped
+  overlap_score:        float [0,1]
+  tuple_overlap_hash:   hex64
+  evidence_sop_tuples:  [SOPTuple]
+  completion_sop_tuples: [SOPTuple]
+  latency_ms:           float
+}
+
+SOPTuple {
+  subject:      string
+  predicate:    string
+  object:       string
+  confidence:   float [0,1]
+  source:       enum   -- "evidence" | "completion"
+  unit_id:      string | null
+}
+```
+
+### 3.7 AccessDecision
+
+```
+AccessDecision {
+  result:                   enum      -- "allowed" | "denied" | "partial"
+  scope:                    string
+  policy_basis:             [string]
+  resources_considered:     integer  -- must equal evidence_boundary.prompt_unit_count
+  resources_authorized:     integer
+  resources_filtered:       integer
+  authorization_model_id:   string
+  store_id:                 string
+  traversal_log:            [TraversalEvent]
+  rebac_tuples:             [ReBACTuple]
+}
+
+TraversalEvent {
+  call_type:                enum      -- "Check" | "ListObjects"
+  user:                     string
+  relation:                 string
+  object:                   string
+  result:                   boolean
+  latency_ms:               float
+  authorization_model_id:   string
+  tuple_keys_evaluated:     [TupleKey]
+}
+
+ReBACTuple {
+  user:       string
+  relation:   string
+  object:     string
+  condition:  string | null
+}
+```
+
+### 3.8 StageHashMap
+
+```
+StageHashMap {
+  "contract.classified":    hex64
+  "evidence.retrieved":     hex64
+  "prompt.constructed":     hex64
+  "inference.completed":    hex64
+  "verification.completed": hex64
+  "access.decided":         hex64
+}
+```
+
+---
+
+## 4. Hard Gates
+
+Hard gates are evaluated before the remaining predicate set. A single hard gate failure designates the payload as **INCOMPLETE**. Predicate evaluation continues so the gap list is complete, but the payload cannot achieve any compliance designation other than INCOMPLETE regardless of how the rest of the predicate matrix resolves.
+
+| Gate ID | Predicate | Rationale |
+|---------|-----------|-----------|
+| HG-01 | `completion_attestation.completion_hash == gate_attestation.claim_hash` | If these diverge, the gate attested a different completion than was returned. The entire verification chain is invalid. |
+| HG-02 | `completion_attestation.key_id ≠ ""` AND `gate_attestation.key_id ≠ ""` | HMAC signatures present but unverifiable without key identity. Independent audit is impossible. |
+| HG-03 | All six keys present in `stage_hashes` AND all values non-empty | Any missing stage hash means the chain has a gap. The artifact cannot prove that stage executed. |
+| HG-04 | `tuple_gate.skipped == false` | The structural prefilter step (SOP tuple overlap) was never executed, so downstream entailment scoring is unanchored to evidence structure. **Note:** SOP overlap is a high-precision structural prefilter for candidate support relations, not a semantic entailment claim. Negation, quantification, modality, temporal scope, and authority conditions can invert meaning at high overlap. Claim-level entailment is a v0.2 extension. |
+| HG-05 | `turn_index == 1` OR `prior_hash ≠ ""` | For any turn after the first, an empty prior_hash means the session chain is broken. Multi-turn audit is impossible. |
+
+---
+
+## 5. Predicate Set
+
+### 5.1 Predicate Class Severity
+
+| Class | Severity | Failure Meaning |
+| ----- | -------- | --------------- |
+| HARD_GATE | Disqualifying | Single failure → INCOMPLETE status regardless of other predicates |
+| CONSISTENCY | Critical | Internal cross-field integrity broken — artifact untrusted |
+| CHAIN | Critical | Stage ordering or linkage broken — forensic replay impossible |
+| COVERAGE | Substantial | Step ran but did not produce all expected artifacts — partial governance |
+| PRESENCE | Necessary | Field exists and is non-empty — necessary but not sufficient |
+
+Classes are not numerically weighted. Pass counts are reported per class (section 6.4); failures are listed in the gap list (section 6.7). Comparing failures across classes by adding their pass counts would be a category error — a consistency failure and a presence failure are not commensurable.
+
+### 5.2 Presence Predicates (Weight 1)
+
+| ID | Field | Predicate | Stage |
+|----|-------|-----------|-------|
+| PR-01 | `envelope_version` | non-empty string | envelope |
+| PR-02 | `request_id` | valid UUID | envelope |
+| PR-03 | `session_id` | valid UUID | envelope |
+| PR-04 | `turn_index` | integer ≥ 1 | envelope |
+| PR-05 | `query_sha256` | 64-char hex | envelope |
+| PR-06 | `policy.corpus_version_hash` | non-empty | policy |
+| PR-07 | `policy.source_ids` | non-empty list | policy |
+| PR-08 | `completion_attestation.completion_text` | non-empty string | inference |
+| PR-09 | `completion_attestation.completion_hash` | 64-char hex | inference |
+| PR-10 | `completion_attestation.key_id` | non-empty string | inference |
+| PR-11 | `completion_attestation.signature` | non-empty hex | inference |
+| PR-12 | `completion_attestation.seed` | integer ≥ 0 | inference |
+| PR-13 | `completion_attestation.model_id` | non-empty string | inference |
+| PR-14 | `completion_attestation.model_version` | non-empty string | inference |
+| PR-15 | `completion_attestation.system_prompt_text` | non-empty string | prompt |
+| PR-16 | `completion_attestation.system_prompt_hash` | 64-char hex | prompt |
+| PR-17 | `completion_attestation.assembled_prompt_hash` | 64-char hex | prompt |
+| PR-18 | `completion_attestation.ra_hash` | non-empty string (including "not_applicable") | inference |
+| PR-19 | `completion_attestation.ra_mode` | valid enum value | inference |
+| PR-20 | `gate_attestation.key_id` | non-empty string | verification |
+| PR-21 | `gate_attestation.entailment_score` | float in [0,1] | verification |
+| PR-22 | `gate_attestation.overlap_score` | float in [0,1] | verification |
+| PR-23 | `gate_attestation.evidence_units_hash` | 64-char hex | verification |
+| PR-24 | `gate_attestation.tuple_overlap_hash` | 64-char hex | verification |
+| PR-25 | `gate_attestation.entailment_claims_hash` | 64-char hex | verification |
+| PR-26 | `gate_attestation.gate_version` | non-empty string | verification |
+| PR-27 | `access_decision.authorization_model_id` | non-empty string | access |
+| PR-28 | `access_decision.store_id` | non-empty string | access |
+| PR-29 | `access_decision.traversal_log` | non-empty list | access |
+| PR-30 | `access_decision.rebac_tuples` | non-empty list | access |
+
+### 5.3 Consistency Predicates (Weight 3)
+
+| ID | Predicate | Stage Scope | Failure Meaning |
+|----|-----------|-------------|-----------------|
+| CO-01 | `completion_attestation.completion_hash == gate_attestation.claim_hash` | inference ↔ verification | Gate attested a different completion |
+| CO-02 | `sha256(completion_attestation.system_prompt_text) == completion_attestation.system_prompt_hash` | prompt | Prompt hash doesn't match stored text |
+| CO-03 | `sha256(completion_attestation.completion_text) == completion_attestation.completion_hash` | inference | Completion hash doesn't match stored text |
+| CO-04 | `policy.corpus_version_hash == completion_attestation.governance.corpus_version_hash` | policy ↔ inference | Corpus version drifted between policy and inference |
+| CO-05 | `access_decision.resources_considered == evidence_boundary.prompt_unit_count` | access ↔ evidence | Access decision didn't evaluate all promoted units |
+| CO-06 | `access_decision.resources_authorized + access_decision.resources_filtered == access_decision.resources_considered` | access | Access accounting doesn't sum |
+| CO-07 | `evidence_boundary.sire_unresolved_count == count(u in evidence_boundary.evidence_units where u.sire_unresolved == true and u.promoted == true)` | evidence | Unresolved SIRE count doesn't match unit list |
+| CO-08 | `count(u in evidence_boundary.evidence_units where u.promoted == true) == evidence_boundary.prompt_unit_count` | evidence | Promoted unit count doesn't match list |
+| CO-09 | `count(evidence_boundary.evidence_units) == evidence_boundary.retrieved_unit_count` | evidence | Total unit count doesn't match list length |
+| CO-10 | `gate_attestation.ca_hash == completion_attestation.completion_hash` | verification | Gate chain anchor doesn't reference completion |
+
+### 5.4 Chain Predicates (Weight 3)
+
+| ID | Predicate | Failure Meaning |
+|----|-----------|-----------------|
+| CH-01 | All six stage keys present in `stage_hashes` | Pipeline stage missing from record |
+| CH-02 | `completion_attestation.prior_hash == stage_hashes["prompt.constructed"]` | Inference stage doesn't chain from prompt |
+| CH-03 | `gate_attestation.prior_hash == stage_hashes["inference.completed"]` | Verification stage doesn't chain from inference |
+| CH-04 | `chain_status == "complete"` on `completion_attestation` | Completion chain incomplete |
+| CH-05 | `chain_status == "complete"` on `gate_attestation` | Gate chain incomplete |
+| CH-06 | `envelope.chain_status == "complete"` | Top-level chain status incomplete |
+| CH-07 | `turn_index == 1 OR prior_hash ≠ ""` | Session chain broken between turns |
+| CH-08 | `gate_attestation.prior_gate_hash` is null iff `gate_attestation.appeal_depth == 0` | Appeal chain inconsistency |
+
+### 5.5 Coverage Predicates (Weight 2)
+
+| ID | Predicate | Scoring | Failure Meaning |
+|----|-----------|---------|-----------------|
+| CV-01 | `evidence_boundary.sire_unresolved_count == 0` | binary | Promoted units without canonical identity |
+| CV-02 | All promoted units have `sire_tag ≠ null` | fraction resolved | Partial SIRE coverage |
+| CV-03 | `tuple_gate.evidence_sop_tuples` non-empty | binary | No evidence SOP tuples extracted |
+| CV-04 | `tuple_gate.completion_sop_tuples` non-empty | binary | No completion SOP tuples extracted |
+| CV-05 | `tuple_gate.overlap_score > 0` | score passthrough | No structural overlap between evidence and completion |
+| CV-06 | `access_decision.traversal_log` covers all promoted unit_ids | fraction covered | ReBAC traversal doesn't cover promoted set |
+| CV-07 | `access_decision.rebac_tuples` non-empty | binary | No relationship tuples recorded |
+| CV-08 | All promoted units have `text` field non-empty | fraction present | Chunk text not retained in artifact |
+| CV-09 | `count(evidence_boundary.evidence_units) == evidence_boundary.retrieved_unit_count` | binary | Non-promoted units not captured |
+| CV-10 | `completion_attestation.system_prompt_text` non-empty | binary | Prompt text not retained |
+| CV-11 | `completion_attestation.seed` is deterministic from `request_id` | binary | Inference not deterministically seeded |
+| CV-12 | `gate_attestation.gate_version` non-empty | binary | Gate version untracked |
+| CV-13 | `policy.source_ids` non-empty and matches corpus scope | binary | Source scope not recorded |
+| CV-14 | `sufficiency.reasons` non-empty | binary | Promotion decision rationale absent |
+
+---
+
+## 6. Evaluation Procedure
+
+### 6.1 Schema Validation
+
+Parse the payload P against the schema in section 3. A payload that fails parsing is REJECTED — it is not an INCOMPLETE artifact, it is not a governance artifact at all. Return:
+
+```json
+{ "status": "REJECTED", "reason": "<parse error>" }
+```
+
+Legacy artifacts predating the current schema version are handled per section 10.1.
+
+### 6.2 Hard Gate Evaluation
+
+Evaluate the five hard gates against G:
+
+```
+function evaluate_hard_gates(G):
+  results = {}
+  for gate in [HG-01, HG-02, HG-03, HG-04, HG-05]:
+    results[gate.id] = gate.predicate(G)
+  failed = [g for g in results where results[g] == fail]
+  return (failed == [], failed)
+```
+
+If any hard gate fails, the artifact's terminal status is INCOMPLETE. Evaluation of the remaining predicate set continues so the gap list is complete, but no other status is reachable.
+
+### 6.3 Predicate Matrix
+
+Evaluate each predicate against G. Each emits one of `{pass, fail, warn}` per its definition. Predicates that derive from a fraction (e.g., CV-02 "fraction resolved") use the threshold rule documented per predicate to project the fraction onto the three-state enum; absent an explicit threshold, fraction ≥ 1.0 → pass, fraction == 0.0 → fail, otherwise → warn.
+
+`warn` is reserved for predicates whose precondition is legitimately absent (section 10.3) and for fractional results between strict pass and fail. It is not a discretionary "soft fail."
+
+### 6.4 Class-Level Pass Vector
+
+Compute pass counts per predicate class. A `warn` counts as half-pass in the count for visibility; it does not contribute to status determination.
+
+```
+predicate_pass = {
+  "hard_gates":   "<passed>/<total>",
+  "presence":     "<passed>/<total>",
+  "consistency":  "<passed>/<total>",
+  "chain":        "<passed>/<total>",
+  "coverage":     "<passed>/<total>"
+}
+```
+
+Pass counts are reported alongside the full predicate result matrix. They are not aggregated across classes — combining a chain failure and a presence failure into a single number is a category error.
+
+### 6.5 Coverage Vector
+
+Compute per-stage pass rates for diagnostic use:
+
+```
+coverage_vector = {
+  "policy":        fraction of policy-scoped predicates passing,
+  "evidence":      fraction of evidence-scoped predicates passing,
+  "prompt":        fraction of prompt-scoped predicates passing,
+  "inference":     fraction of inference-scoped predicates passing,
+  "verification":  fraction of verification-scoped predicates passing,
+  "access":        fraction of access-scoped predicates passing
+}
+```
+
+The coverage vector is a remediation-targeting diagnostic — it identifies which stages need attention. It is not the basis for any compliance designation.
+
+### 6.6 Status Taxonomy
+
+| Status | Condition |
+| ------ | --------- |
+| REJECTED | Schema parsing failed. Not a governance artifact. |
+| INCOMPLETE | At least one hard gate failed. |
+| STRUCTURALLY_INCOMPLETE | All hard gates pass; one or more presence, consistency, chain, or coverage predicates failed. |
+| STRUCTURALLY_COMPLETE | All hard gates and all predicates pass. |
+
+Status is categorical and orthogonal to `replay_viable` (section 7). A STRUCTURALLY_COMPLETE artifact may still fail `replay_viable` if specific replay-required predicates fail in `warn` rather than `pass`. A STRUCTURALLY_INCOMPLETE or INCOMPLETE artifact cannot be `replay_viable`.
+
+The taxonomy deliberately excludes a numerical score. Aggregating predicate results into a number reintroduces interpretive ambiguity — readers compare "0.85 vs 0.72" without knowing which predicates contributed. The categorical taxonomy and the predicate matrix together carry the same information as a score would, with no false precision.
+
+### 6.7 Output Schema
+
+```json
+{
+  "benchmark_version": "0.1",
+  "schema_sha256": "<sha256 of canonical form of this specification at the named version>",
+  "evaluated_at": "<iso8601>",
+  "evaluator_key_id": "<key identifier>",
+  "request_id": "<uuid from payload>",
+  "payload_sha256": "<sha256 of canonical form of input payload>",
+  "status": "REJECTED | INCOMPLETE | STRUCTURALLY_INCOMPLETE | STRUCTURALLY_COMPLETE",
+  "predicate_pass": {
+    "hard_gates":   "0/5",
+    "presence":     "0/30",
+    "consistency":  "0/10",
+    "chain":        "0/8",
+    "coverage":     "0/14"
+  },
+  "hard_gates": {
+    "passed": ["HG-01", "HG-03", "HG-05"],
+    "failed": ["HG-02", "HG-04"]
+  },
+  "coverage_vector": {
+    "policy":       0.00,
+    "evidence":     0.00,
+    "prompt":       0.00,
+    "inference":    0.00,
+    "verification": 0.00,
+    "access":       0.00
+  },
+  "predicate_results": {
+    "PR-01": "pass",
+    "PR-10": "fail",
+    "CO-01": "pass",
+    "CH-02": "fail",
+    "CV-03": "warn"
+  },
+  "gaps": [
+    {
+      "predicate_id": "HG-02",
+      "class": "HARD_GATE",
+      "field": "completion_attestation.key_id",
+      "finding": "key_id is empty string",
+      "remediation": "Signing service must pass key_id alongside HMAC signature."
+    }
+  ],
+  "replay_viable": false,
+  "coerced_fields": [],
+  "evaluator_signature": "<ed25519 signature over the canonical form of this report excluding the signature field>"
+}
+```
+
+A report missing `schema_sha256`, `evaluator_key_id`, `payload_sha256`, or `evaluator_signature` is not a KGB-conforming evaluation result, regardless of its content (section 10.6).
+
+---
+
+## 7. Replay Viability Assessment
+
+The benchmark computes a binary `replay_viable` flag orthogonal to the status taxonomy. Replay viability is a strictly stronger condition than STRUCTURALLY_COMPLETE — an artifact may have every predicate pass and still fail replay if a specific replay-required predicate resolved as `warn` rather than `pass`.
+
+**Replay requires all of the following:**
+
+| Requirement | Predicate |
+|-------------|-----------|
+| Completion text retained | PR-08 passes |
+| System prompt text retained | PR-15 passes |
+| Inference seed recorded | PR-12 passes AND CV-11 passes |
+| All stage hashes present | CH-01 passes |
+| Chain continuous | CH-02, CH-03, CH-04, CH-05, CH-06 all pass |
+| Session linkage present | CH-07 passes |
+| Full retrieval set captured | CV-09 passes |
+| SOP tuples present | CV-03 AND CV-04 pass |
+| Key ID present | PR-10 AND PR-20 pass |
+| ReBAC traversal captured | CV-06 passes |
+
+`replay_viable = true` iff all ten conditions hold.
+
+---
+
+## 8. Reference Evaluation: payload2.json
+
+The following is the benchmark evaluation of the reference artifact from the Goober development environment, Kenshiki Labs, May 11 2026.
+
+### 8.1 Hard Gate Results
+
+| Gate | Result | Finding |
+|------|--------|---------|
+| HG-01 | PASS | `completion_hash == claim_hash` — consistent |
+| HG-02 | **FAIL** | `key_id` is empty string in both attestations |
+| HG-03 | **FAIL** | Stage hashes not present as structured map; inferred from envelope fields only |
+| HG-04 | **FAIL** | `tuple_gate.skipped == true` |
+| HG-05 | PASS | `turn_index` not explicitly present but payload is consistent with turn 1 |
+
+**Status: INCOMPLETE** (3 hard gate failures)
+
+### 8.2 Presence Predicate Results
+
+| ID | Result | Finding |
+|----|--------|---------|
+| PR-01 | pass | envelope_version: "2" |
+| PR-02 | pass | request_id present |
+| PR-03 | warn | session_id not explicitly present |
+| PR-04 | warn | turn_index not present |
+| PR-05 | pass | query_sha256 present |
+| PR-06 | pass | corpus_version_hash present |
+| PR-07 | pass | source_ids present and non-empty |
+| PR-08 | **fail** | completion_text absent from payload (hash only) |
+| PR-09 | pass | completion_hash present |
+| PR-10 | **fail** | key_id is empty string |
+| PR-11 | pass | signature present |
+| PR-12 | **fail** | seed absent |
+| PR-13 | pass | model_id: "Qwen/Qwen3-14B" |
+| PR-14 | **fail** | model_version is empty string |
+| PR-15 | **fail** | system_prompt_text absent (hash only) |
+| PR-16 | pass | system_prompt_hash present |
+| PR-17 | **fail** | assembled_prompt_hash absent |
+| PR-18 | **fail** | ra_hash is empty string |
+| PR-19 | **fail** | ra_mode absent |
+| PR-20 | **fail** | gate_attestation.key_id is empty string |
+| PR-21 | pass | entailment_score: 0.9926 |
+| PR-22 | **fail** | overlap_score absent |
+| PR-23 | **fail** | evidence_units_hash present but evidence_sop_tuples absent |
+| PR-24 | pass | tuple_overlap_hash present |
+| PR-25 | pass | entailment_claims_hash present |
+| PR-26 | **fail** | gate_version is empty string |
+| PR-27 | **fail** | authorization_model_id absent |
+| PR-28 | **fail** | store_id absent |
+| PR-29 | **fail** | traversal_log absent |
+| PR-30 | **fail** | rebac_tuples absent |
+
+### 8.3 Consistency Predicate Results
+
+| ID | Result | Finding |
+|----|--------|---------|
+| CO-01 | pass | completion_hash == claim_hash |
+| CO-02 | **fail** | system_prompt_text absent; cannot verify hash |
+| CO-03 | **fail** | completion_text absent; cannot verify hash |
+| CO-04 | pass | corpus_version_hash consistent across policy and governance blocks |
+| CO-05 | **fail** | resources_considered: 0; prompt_unit_count: 6 — mismatch |
+| CO-06 | pass | 0 + 0 == 0 (internally consistent but incorrect) |
+| CO-07 | **fail** | SIRE unresolved count cannot be verified; SIRE tags absent from units |
+| CO-08 | **fail** | Only 6 units present in payload; 87 non-promoted units absent |
+| CO-09 | **fail** | evidence_units list contains 6 entries; retrieved_unit_count is 93 |
+| CO-10 | pass | ga_hash references completion chain anchor |
+
+### 8.4 Chain Predicate Results
+
+| ID | Result | Finding |
+|----|--------|---------|
+| CH-01 | **fail** | stage_hashes map not present as structured field |
+| CH-02 | **fail** | completion_attestation.prior_hash absent/not linked to prompt stage |
+| CH-03 | pass | gate_attestation.prior_hash references ca_hash |
+| CH-04 | pass | chain_status: "complete" on completion_attestation |
+| CH-05 | pass | chain_status: "complete" on gate_attestation |
+| CH-06 | pass | envelope chain_status: "complete" |
+| CH-07 | pass | Consistent with turn 1 (prior_hash empty) |
+| CH-08 | pass | prior_gate_hash: null; appeal_depth: 0 |
+
+### 8.5 Coverage Predicate Results
+
+| ID | Result | Finding |
+|----|--------|---------|
+| CV-01 | **fail** | SIRE tags absent from all evidence units |
+| CV-02 | **fail** | 0/6 promoted units have sire_tag |
+| CV-03 | **fail** | evidence_sop_tuples absent |
+| CV-04 | **fail** | completion_sop_tuples absent |
+| CV-05 | **fail** | overlap_score absent |
+| CV-06 | **fail** | traversal_log absent; cannot verify ReBAC coverage |
+| CV-07 | **fail** | rebac_tuples absent |
+| CV-08 | warn | 6 promoted units have text; 87 non-promoted units absent |
+| CV-09 | **fail** | 87 retrieved units not captured in payload |
+| CV-10 | **fail** | system_prompt_text absent |
+| CV-11 | **fail** | seed absent |
+| CV-12 | **fail** | gate_version empty |
+| CV-13 | pass | source_ids present and non-empty |
+| CV-14 | pass | sufficiency.reasons present |
+
+### 8.6 Computed Results
+
+**Status: INCOMPLETE** — three hard gates failed (HG-02, HG-03, HG-04). No further status is reachable for this artifact regardless of predicate matrix.
+
+**Class-level pass vector** (warns count half for visibility only):
+
+| Class | Pass Rate |
+| ----- | --------- |
+| hard_gates | 2/5 |
+| presence | 8/30 |
+| consistency | 4/10 |
+| chain | 6/8 |
+| coverage | 2/14 |
+
+**Summary**:
+
+| Field | Value |
+| ----- | ----- |
+| Status | INCOMPLETE |
+| Hard Gates Failed | HG-02, HG-03, HG-04 |
+| Replay Viable | false |
+| Coerced Fields | `stage_hashes` (see 8.1 note) |
+
+Note: this artifact predates the v2 schema's structured `stage_hashes` map. Section 8 operates under legacy coercion mode per section 10.1 — stage hashes were inferred from envelope fields. Coercion mode produces INCOMPLETE regardless of remaining matrix.
+
+### 8.7 Coverage Vector (Diagnostic)
+
+| Stage | Pass Rate |
+| ----- | --------- |
+| policy | 1.00 |
+| evidence | 0.12 |
+| prompt | 0.17 |
+| inference | 0.38 |
+| verification | 0.55 |
+| access | 0.08 |
+
+Evidence and access stages are the primary remediation targets. This vector is diagnostic only — it does not contribute to status determination.
+
+---
+
+## 9. Predicate Class Rationale
+
+Each predicate class addresses a distinct claim in the audit theory. The classes are not ranked on a continuous scale because the failures they detect are not commensurable.
+
+**Hard Gates — disqualifying conditions.**
+A hard gate failure invalidates the artifact regardless of how other predicates resolve. The five gates correspond to integrity assumptions every other predicate depends on: completion attestation matches gate attestation (HG-01), HMAC signatures can be independently verified (HG-02), every pipeline stage is recorded (HG-03), structural entailment was actually computed (HG-04), and multi-turn chain linkage is intact (HG-05). Without these, the artifact's other passing predicates are not interpretable.
+
+**Consistency — internal integrity.**
+A consistency failure means two fields that should agree don't agree — a hash mismatch, a count mismatch, a corpus version drift. The artifact cannot be trusted; it has been tampered with, miscomputed, or produced by an inconsistent process. A single CO failure should be treated as terminal for any audit conclusion, even when status remains STRUCTURALLY_INCOMPLETE rather than INCOMPLETE. (Several CO predicates are also hard gates — CO-01 ≡ HG-01 — to enforce this directly in the status taxonomy.)
+
+**Chain — stage linkage.**
+A chain failure means the pipeline cannot be replayed in order. The stages may have executed, but their linkage is missing or wrong. Forensic reconstruction requires the chain. Chain failures and consistency failures together establish whether the artifact is interpretable at all.
+
+**Coverage — completeness gaps.**
+A coverage failure means a step ran but didn't produce all the artifacts it should have. The structural entailment ran but with no tuples extracted; the access decision was made but the traversal log is empty. The artifact is partial — governance was attempted but not completed.
+
+**Presence — necessary preconditions.**
+A presence failure means a field is missing or empty. Necessary but not sufficient — a field can be present and still wrong. Presence predicates establish that the artifact attempted governance; consistency, chain, and coverage predicates establish whether it achieved it.
+
+**Why no weights, no aggregate score.**
+A weighted aggregate would invite "we're 0.85, they're 0.72" comparisons that have no theoretical grounding. Two predicate failures in different classes are not commensurable: a hash mismatch and a missing field are different kinds of defect, and forcing them onto a common scale is a category error. The class-level pass vector reports each class independently. Comparisons between artifacts are made class-by-class, not by adding numbers.
+
+**Closest formal analogy: proof-carrying evidence.**
+The construction is closest in spirit to Necula's Proof-Carrying Code (PCC, POPL '97): a producer attaches to its output a precise, locally checkable record that the consumer can verify without re-running the production process. KGB does not claim sequent calculus, defeasible argumentation, or Toulmin-schema warrant derivation; the spec uses typed schemas, canonicalized hashing, and authenticated chain semantics. The PCC analogy is narrow but accurate: the governance payload is an *audit-carrying execution trace*, and KGB's role is the locally checkable verification procedure over that trace.
+
+---
+
+## 10. Implementation Notes
+
+### 10.1 Schema Validation and Legacy Coercion
+
+Parse the payload against the schema before predicate evaluation. A payload that fails schema parsing is REJECTED — it is not an INCOMPLETE artifact, it is not a governance artifact at all. Return `{"status": "REJECTED", "reason": "<parse error>"}`.
+
+**Legacy coercion mode.** Payloads predating the current schema version may be evaluated in best-effort coercion mode if the implementation defines a documented coercion rule per legacy field (e.g., inferring `stage_hashes` from envelope-level chain fields). Coerced evaluations:
+
+- MUST emit `status: "INCOMPLETE"` regardless of predicate matrix
+- MUST list every coerced field in the report's `coerced_fields` array
+- MUST emit `replay_viable: false`
+
+Coercion mode is a remediation aid for legacy artifacts under active migration — not a compliance path. A legacy artifact cannot achieve STRUCTURALLY_COMPLETE without conforming to the current schema.
+
+### 10.2 Predicate Evaluation Order
+
+Evaluate in order: hard gates → consistency predicates → chain predicates → coverage predicates → presence predicates. This order surfaces catastrophic failures first in the gap list and supports incremental evaluators that may abandon analysis after a hard gate fails (though full evaluation is recommended so the gap list is complete).
+
+### 10.3 Partial Payloads
+
+Some fields are conditionally required. `ra_hash` can be "not_applicable" if `ra_mode == "standard_compute"`. `prior_hash` can be empty if `turn_index == 1`. The predicate definitions above account for these conditions. A field that is legitimately absent under its condition should be scored as `warn`, not `fail`.
+
+### 10.4 Version Compatibility
+
+The benchmark version must be stored alongside every evaluation result. As the schema evolves, predicate sets may change. An artifact scored against v0.1 cannot be directly compared to one scored against v0.2 without a compatibility mapping. Maintain a predicate changelog.
+
+### 10.5 Reference Implementation
+
+The reference implementation accepts a payload as a JSON file via CLI and returns the signed evaluation report as JSON to stdout:
+
+```bash
+kgb evaluate --payload payload2.json --output report.json
+kgb evaluate --payload payload2.json --format human
+```
+
+The human-readable format prints the status, class-level pass vector, hard gate results, coverage vector, replay_viable flag, and an ordered gap list with remediation pointers. It does NOT print an aggregate score because none is computed.
+
+### 10.6 Benchmark Self-Attestation
+
+The benchmark's output is itself a governance artifact and must satisfy the discipline it imposes. The reference implementation MUST emit:
+
+- `benchmark_version`: the named version of this specification
+- `schema_sha256`: SHA-256 over the canonical form (RFC 8785) of this specification at `benchmark_version`
+- `evaluator_key_id`: identifier of the signing key used to attest this report
+- `payload_sha256`: SHA-256 over the canonical form of the input payload
+- `evaluator_signature`: Ed25519 signature over the canonical form of the report excluding the `evaluator_signature` field
+
+A report that lacks these fields is not a KGB-conforming evaluation result, regardless of its content. Reports that consumers cannot independently verify do not constitute audit evidence — the same standard the benchmark applies to evaluated artifacts.
+
+The benchmark spec, schema, and reference implementation are versioned together. A spec change without a corresponding implementation release produces reports that cannot validate against the named `schema_sha256` and MUST be treated as REJECTED.
+
+---
+
+## 11. Future Predicate Extensions
+
+The following predicate classes are out of scope for v0.1 but are planned for subsequent versions:
+
+**Semantic Drift Detection (v0.2):** Evaluate whether the completion's claims are semantically consistent with the evidence not just at the structural level but at the meaning level — detecting cases where SOP tuples match structurally but the semantic content of subject or object has drifted.
+
+**Temporal Validity (v0.2):** Evaluate whether the corpus version in use was the authoritative version at the time of the request — flagging cases where a more recent corpus update existed but wasn't applied.
+
+**Cross-Turn Consistency (v0.3):** For multi-turn sessions, evaluate whether the evidence scope is consistent across turns — detecting cases where a source was authorized in turn 1 but not turn 3, or where the corpus version changed mid-session.
+
+**Jurisdictional Coherence (v0.3, candidate — boundary question):** Evaluate whether the source_ids in scope are jurisdictionally appropriate to the query — flagging cases where EU GDPR sources are promoted in response to a US CFPB question. **Note:** this requires NLU on the query to determine its jurisdictional scope, which crosses the process-property/output-property boundary stated in section 1. If implemented, this extension should be published as a sibling content-correctness benchmark (KCB or similar), not as a KGB predicate. KGB v0.1's framing of process audit must remain content-agnostic.
+
+---
+
+## 12. Related Work
+
+The closest published analog to this specification is *Audit Trails for Accountability in Large Language Models* (arXiv 2601.20727, Jan 2026), which proposes chronological, tamper-evident ledgers as a sociotechnical accountability mechanism for LLM systems. KGB-Structural specifies the artifact-level discipline that ledger would record: typed schema, deterministic predicates, canonical hashing, signed reports.
+
+Chain semantics derive from authenticated append-only log literature, notably Certificate Transparency (RFC 6962) and Merkle-tree inclusion-proof constructions. Compliance-framework analogs include FIPS 140 (categorical conformance), Common Criteria (evaluation assurance levels with itemized findings), SOC 2 (qualified opinions over control objectives), and MITRE ATT&CK coverage matrices (per-technique checkmarks). None of these publish an aggregate float; KGB inherits that discipline directly.
+
+The proof-carrying analogy (section 9) traces to Necula, *Proof-Carrying Code* (POPL '97).
+
+---
+
+*End of Specification*
+
+**Document Control:**  
+Public Draft v0.1 — Apache 2.0.  
+Next review: upon completion of v0.1 reference implementation.  
+Owner: Kenshiki Labs.

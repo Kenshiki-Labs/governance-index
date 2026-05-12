@@ -1,0 +1,33 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+@plugin "daisyui" {
+  themes:
+    light --default,
+    dark --prefersdark;
+}
+
+/* Tailwind v4 design tokens. Anything that previously lived as a raw
+   value in component CSS gets registered here so it can be referenced via
+   utility classes (font-display, tracking-tight, leading-none, etc.). */
+@theme {
+  --font-display: "Space Grotesk", system-ui, sans-serif;
+}
+
+/* Tie Tailwind's `dark:` variant to the same prefers-color-scheme signal
+   DaisyUI's `--prefersdark` theme uses. With this, `dark:prose-invert`
+   activates exactly when DaisyUI swaps to the dark theme. */
+@custom-variant dark (@media (prefers-color-scheme: dark));
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+}

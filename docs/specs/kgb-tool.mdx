@@ -1,0 +1,1807 @@
+# Kenshiki Governance Benchmark — Tool Specification
+
+## Reference Implementation, Operator Interface, and Distribution
+
+**Version:** 0.1
+**Status:** Public Draft — open methodology specification
+**License:** Apache 2.0
+
+**Companion Documents:**
+
+- KGB-Structural Specification v0.1 (methodology)
+- KGB-Public Specification v0.1 (methodology, behavioral probe suite)
+
+**Authors:** Kenshiki Labs
+**Date:** May 2026
+
+---
+
+## 1. Purpose and Scope
+
+This document specifies **kgb**, the reference benchmarking tool that implements the KGB-Structural and KGB-Public methodology specifications. The tool runs governance evaluations against public model APIs and emits signed, independently verifiable reports.
+
+**The tool's primary purpose is public credibility.** It is designed to serve the same role for AI governance that HaluEval, HalluLens, SimpleQA, FACTS Grounding, and TruthfulQA serve for hallucination/factuality: a published, reproducible, openly-methodology'd benchmark that the industry uses as a shared yardstick. Kenshiki publishes scores continuously against frontier model APIs at `benchmarks.kenshikilabs.com`; any third party can independently re-run the tool against any model and produce a verifiable report comparable to the published numbers.
+
+The methodology specs answer *what to measure and how to score*. This document answers *what to build, who operates it, how the public leaderboard is governed, and how independent reproducibility is preserved*.
+
+The tool is **not** a replacement for the methodology specs. It is the canonical reference implementation against which conformance is judged. Other implementations of the methodology are permitted; conformance is determined by whether they produce identical signed reports against identical inputs.
+
+### 1.1 Audience and Operating Surface
+
+| Audience | v0.1 | v0.2 | v0.3 |
+| -------- | ---- | ---- | ---- |
+| Public leaderboard at benchmarks.kenshikilabs.com (Kenshiki-run, continuous) | ✓ | ✓ | ✓ |
+| Independent researcher / third party (reproducible re-run) | ✓ | ✓ | ✓ |
+| Model vendor self-assessment (vendor runs against own API before publication) | ✓ | ✓ | ✓ |
+| Press / industry analyst (consume leaderboard data, optionally re-run) | ✓ | ✓ | ✓ |
+| Internal Kenshiki engineering | ✓ | ✓ | ✓ |
+| Customer procurement (run against APIs under evaluation) | — | ✓ | ✓ |
+| Regulator / accredited auditor (deterministic replay for filings) | — | ✓ | ✓ |
+
+**v0.1 ships as a free, openly-published runner.** Distribution is open source from day one (or signed reproducible binary, depending on the open-source-vs-binary decision in §5). The methodology, probe registry, and runner are all reproducible by any third party. The credibility model is the same as HaluEval: the methodology is the product; the runner is the engine that produces the leaderboard; the leaderboard is what the industry argues about.
+
+Customer procurement is a secondary use case that piggybacks on the same artifact (the signed report) — procurement teams use the same tool the public leaderboard uses, scoped to their own evaluated APIs. v0.1 supports this but the primary v0.1 narrative is the public benchmark.
+
+### 1.2 What the Tool Produces
+
+A single invocation produces one signed report per evaluated target model, containing:
+
+- **Structural section** — output of KGB-Structural §6 against the proxy payload constructed from the target API's response metadata
+- **Behavioral section** — measurements across the four first-order dimensions (EC, SAS, IF, AUC) plus the reliability profile (RS, TS, CA, PS), per KGB-Public §5
+- **Classification** — categorical deployment recommendation per KGB-Public §6
+- **Regulatory mapping** — per-framework `cannot_verify` / `partial` / `verified` status per KGB-Public §7
+- **Self-attestation** — four-hash chain (tool, probe registry, schema, evaluator) + Ed25519 signature
+
+Reports are produced in two formats:
+
+- **Signed JSON** — canonical (RFC 8785), machine-readable, the authoritative artifact
+- **Signed PDF** — human-readable, procurement-friendly, derived from the JSON
+
+A third-party with the published public keys can verify either artifact independently using `kgb verify`.
+
+---
+
+## 2. Architecture Overview
+
+```text
+┌───────────────────┐      ┌─────────────────────┐
+│  Operator UI      │      │  Probe Registry     │
+│  - CLI (v0.1)     │←────→│  - signed YAML      │
+│  - HTTP API (v0.2)│      │  - held-out subset  │
+└────────┬──────────┘      └──────────┬──────────┘
+         │                            │
+         ▼                            │
+┌────────────────────┐                │
+│  Run Orchestrator  │←───────────────┘
+│  - concurrency     │
+│  - retry / backoff │       ┌─────────────────────┐
+│  - cost ceiling    │←─────→│  Adapter Layer      │
+│  - mode selection  │       │  - openai / claude  │
+└────────┬───────────┘       │  - gemini / bedrock │
+         │                   │  - azure / vertex   │
+         │                   │  - vllm (open-wt)   │
+         │                   └──────────┬──────────┘
+         │                              │
+         │                              ▼
+         │                       ┌─────────────┐
+         │                       │ Target API  │
+         │                       └─────────────┘
+         ▼
+┌────────────────────┐
+│  Judge Service     │ (pinned multi-judge ensemble:
+│  - claim extract   │  primary frontier judge, secondary
+│  - cite extract    │  judge from different family with
+│  - abstain classify│  anti-conflict routing — §3.4)
+└────────┬───────────┘
+         │
+         ▼
+┌────────────────────┐
+│  Result Store      │
+│  - raw req/resp    │
+│  - evaluator runs  │
+│  - probe outcomes  │
+│  - reliability ext │
+└────────┬───────────┘
+         │
+         ▼
+┌────────────────────┐
+│  Report Builder    │
+│  - canonical JSON  │
+│  - human PDF       │
+│  - Ed25519 sign    │
+└────────────────────┘
+```
+
+Every arrow is async where possible. The tool's hot path is bounded by the slowest API adapter; the evaluator runs in parallel with the next probe's API call.
+
+---
+
+## 3. Component Specifications
+
+### 3.1 Probe Registry
+
+**Format:** versioned directory of signed YAML files, one per probe, plus a manifest file.
+
+```text
+probes/
+  v0.1/
+    manifest.yaml              # registry version, probe list, Merkle root
+    manifest.sig               # Ed25519 signature over canonical manifest
+    public/
+      EC-AA-01.yaml
+      EC-AA-02.yaml
+      ...
+    held-out/
+      (encrypted, only registry maintainer has the key)
+```
+
+**Manifest schema:**
+
+```yaml
+registry_version: "v0.1"
+benchmark_version: "0.1"
+schema_sha256: "<sha256 of KGB-Structural + KGB-Public canonical form>"
+probes:
+  - id: EC-AA-01
+    sha256: "<sha256 of canonical probe file>"
+    suite: EC
+    sub_dimension: EC-AA
+    difficulty: baseline
+    domain: municipal-ordinance
+    public: true
+  - id: ...
+merkle_root: "<sha256 of binary Merkle tree over probe sha256s, ordered lexically by id>"
+maintainer_key_id: "<key identifier>"
+released_at: "<iso8601>"
+```
+
+The Merkle root means a single hash pins the entire registry. The tool verifies that hash matches before any evaluation runs; if the local copy of the registry has been modified, evaluation refuses to start.
+
+**Held-out set:** a parallel directory encrypted with a separate key held only by the registry maintainer. The tool can run against the held-out set only if it is invoked with the decryption material (operator-mode flag, not customer-facing). v0.1 ships with held-out probes; v0.2 opens probe extension to external authors via a documented submission process.
+
+**Probe schema:** matches KGB-Public §5.1's `Probe` struct exactly. Each probe is independently signed by the maintainer.
+
+**Probe origin:** every probe in the registry is authored from a real source unit in Kenshiki's regulatory corpus. The authoring pipeline, source-unit pinning, and open-book framing rules live in §3.9.
+
+**CLI:** `kgb probes list`, `kgb probes inspect <id>`, `kgb probes verify`, `kgb probes diff <v_a> <v_b>`.
+
+### 3.2 Adapter Layer
+
+**Decision:** **OpenRouter as the primary adapter, with direct-provider adapters as an optional override.**
+
+OpenRouter is a unified gateway (`openrouter.ai`) that proxies ~300+ models from OpenAI, Anthropic, Google, Meta, Mistral, DeepSeek, Qwen, and others through a single OpenAI-compatible API. Using it as the primary adapter trades one weeks of engineering and a much simpler operator experience for an intermediary in the attestation chain. The tradeoff is real but defensible if explicitly documented.
+
+#### 3.2.1 Why OpenRouter
+
+- **One adapter instead of six.** OpenRouter is OpenAI-compatible across all listed models. v0.1 ships with one adapter file (~200 lines) instead of six provider-specific adapters.
+- **One API key for end users.** A researcher running the tool against 10 frontier models would otherwise need 10 separate API keys plus billing relationships with each provider. With OpenRouter, they need one key and pay one bill.
+- **Model coverage is canonical.** OpenRouter tracks new model releases within hours; KGB's leaderboard can include a new model immediately upon vendor release without writing new adapter code.
+- **Pass-through metadata.** OpenRouter forwards provider-side identifiers — OpenAI's `system_fingerprint`, Anthropic's request IDs, Google's deployment markers — into the response. The proxy payload captures both OpenRouter's request ID (for the gateway leg) and the provider's native ID (for vendor cross-reference).
+
+#### 3.2.2 The Tradeoff: Indirection in the Attestation Chain
+
+OpenRouter sits between KGB and the model provider. A vendor disputing a result can claim "OpenRouter modified my model's behavior; KGB's results don't reflect my deployment." This is a credibility risk that the methodology must address head-on.
+
+Mitigations:
+
+- **Canonical leaderboard uses OpenRouter.** Kenshiki's continuous monitoring leaderboard runs at `benchmarks.kenshikilabs.com` use OpenRouter for all models. This is an explicit choice — one operational path, one billing relationship, one type of API key. The methodology declares it openly rather than hiding behind selective adapter use across models.
+- **Direct-provider override exists for dispute resolution.** When the operator has a direct provider API key set (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`), KGB can use the direct adapter and bypass OpenRouter. **This is not a default path for Kenshiki's canonical runs — it is the mechanism for vendors disputing a result.** A vendor can re-run the exact published seeds against their own direct provider, produce a signed replay report, and publish it alongside Kenshiki's; if their replay matches Kenshiki's OpenRouter-via report (modulo provider non-determinism, which is itself measured), the dispute is resolved.
+- **OpenRouter pass-through verifiable.** The proxy payload captures both the OpenRouter request ID and the upstream provider's native request ID (passed through OpenRouter's headers). Vendors can look up the provider request ID in their own logs to confirm the inference reached their infrastructure with the parameters KGB claims. The OpenRouter request ID gives Kenshiki a separate audit trail at the gateway leg.
+- **Documented in the methodology.** KGB-Public §8 names OpenRouter as the default adapter and acknowledges the indirection. Every report's `adapter` field is explicit: `openrouter` (the canonical case), `openai`, `anthropic`, `google` (dispute-resolution replays), or `vllm` (open-weights, v0.3). Comparison across adapters requires explicit deterministic replay; reports run via different adapters against the same model are signed independently.
+
+#### 3.2.3 Adapter Interface
+
+```python
+class ProviderAdapter(Protocol):
+    adapter_id: str  # "openrouter" | "openai" | "anthropic" | "google" | "vllm" | ...
+
+    async def call(
+        self,
+        *,
+        model: str,
+        system_prompt: str,
+        user_messages: list[dict],
+        temperature: float,
+        max_tokens: int,
+        seed: int | None,
+        request_id: str,
+    ) -> AdapterResponse: ...
+
+    def construct_proxy_payload(
+        self,
+        request: AdapterRequest,
+        response: AdapterResponse,
+    ) -> ProxyPayload: ...  # per KGB-Public §4.1
+```
+
+**`AdapterResponse` captures:**
+
+- `completion_text`
+- `model_id_returned` (in case the provider proxied through a different model)
+- `model_version_returned` (e.g., `gpt-4o-2024-08-06`; may be `unattested`)
+- `provider_system_fingerprint` (when available — OpenAI returns it, Anthropic does not)
+- `usage` (prompt_tokens, completion_tokens, total_tokens)
+- `latency_ms`
+- `gateway_request_id` (OpenRouter's request ID, if OpenRouter is in path)
+- `provider_request_id` (the upstream provider's own request ID, passed through OpenRouter or captured directly)
+- `raw_response_headers` (a curated allowlist — never auth tokens)
+- `raw_response_body` (for replay; stored encrypted at rest)
+
+#### 3.2.4 Adapters Shipped Per Version
+
+- **v0.1:** `openrouter` (default for all canonical runs), `openai` / `anthropic` / `google` (thin shims for dispute-resolution replay only)
+- **v0.2:** `bedrock`, `azure`, `vertex` (additional dispute-resolution shims for cloud deployments where the model lives behind a cloud vendor's gateway rather than the model vendor's direct API)
+- **v0.3:** `vllm` (for open-weights served via OpenAI-compatible endpoints)
+
+The direct-shim adapters in v0.1 are ~100 lines each. They exist so that any vendor disputing a result can produce a signed replay report against their own direct API. They are not invoked by Kenshiki's continuous leaderboard runs, which use `openrouter` exclusively.
+
+#### 3.2.5 Retry and Rate Limit
+
+**Retry policy:** exponential backoff with jitter; max 3 retries on 429/503/timeout; failures after retry produce a probe-level `EVALUATION_FAILED` outcome that is reported separately from the dimension's score (does not count as `fail`; reduces effective probe count).
+
+**Rate limit awareness:** when OpenRouter is in path, OpenRouter handles per-provider rate limits transparently. When direct adapters are in use, per-provider concurrency caps apply; v0.1 ships sensible defaults; operator can override via config.
+
+**OpenRouter routing pinning:** for models where OpenRouter routes to multiple inference providers (typically open-weight models with multiple hosts), KGB pins the deployment via OpenRouter's `provider.order` parameter to ensure deterministic replay. For closed-weight frontier models (GPT-4o, Claude, Gemini), there is typically one upstream provider and pinning is moot. The pinned provider order is recorded in the report.
+
+### 3.3 Run Orchestrator
+
+The orchestrator composes probes + adapter + evaluator into a complete evaluation. It owns concurrency, cost ceilings, and operating-mode selection.
+
+**Operating modes:**
+
+| Mode | When | Probe sampling | Reliability profile | Cost |
+| ---- | ---- | -------------- | ------------------- | ---- |
+| `quick` | Smoke test, CI gate | Subset (one probe per sub-dim) | RS only, N=3 | ~$3/model |
+| `standard` | Default for procurement | Full v0.1 set | Full (RS, TS, CA, PS) | ~$30–60/model |
+| `full` | Pre-publication, leaderboard | v0.2 expanded set + held-out | Full at higher N | ~$100–200/model |
+| `replay` | Auditor reproducibility check | Replays a prior report's exact seeds and probe set | As original | ~same as original |
+| `calibration` | Probe development | Single probe at high N across multiple evaluators | RS only, N=100 | ~$20/probe |
+
+**Cost ceiling:** `--max-cost-usd N` halts the run with a partial report if cumulative API cost (estimated from per-provider published pricing × actual token usage) exceeds the ceiling. Partial reports are clearly marked `INCOMPLETE_RUN` and excluded from `BEHAVIORALLY_GOVERNED` classification.
+
+**Determinism modes:**
+
+- **Fresh:** each probe gets a random seed; full reliability profile measured.
+- **Deterministic replay:** all seeds, temperatures, and probe IDs taken from a prior report's run manifest. Output should match bit-for-bit (modulo provider non-determinism, which is itself measured).
+
+### 3.4 Judge Service
+
+The judge service implements KGB-Public §8.1's pinned judge ensemble. **Kenshiki Labs is not the judge of any single evaluation.** Judges in v0.1 are two pinned external frontier models (primary + secondary from different provider families) plus a human-annotator calibration sample for pre-publication validation. A pinned open-weight reference judge is added in v0.2 for third-party reproducibility without frontier-API costs. The judge configuration is signed into the registry alongside the probe suite and versioned per benchmark release.
+
+**Architecture: DAG-compiled proof graphs.** Judges do not score responses with free-form rubrics. Each judge **compiles a typed proof graph** from the target model's response, following the Reasoning Trace Integrity (RTI) architecture documented in Kenshiki Labs' SSRN paper (Foley, 2026). The judge treats the target model as an untrusted proposer; its job is to reconstruct the response as a structured graph whose validity is checked against the probe's inline source material and the Catalog Registry of allowed governance inferences (§3.9.8).
+
+Node types:
+
+- **Facts** (graph leaves) — atomic data points the response relies on. Each fact carries an ontology class, a parsed value, provenance (`source_unit_uri`, `content_sha256` from the probe's inline source), and an `anchored: bool` flag indicating whether the fact appears in the probe's provided evidence.
+- **Claims** (internal and root nodes) — typed conclusions the response asserts. Each claim carries a `claim_type` drawn from a versioned taxonomy (e.g., `classification.eu_ai_act.high_risk.v1`, `definitional.hipaa.business_associate.v1`).
+- **Refusal** (alternative root) — when the response declines to answer, the judge emits a typed refusal from an enumerated taxonomy (`refuse.no_evidence`, `refuse.out_of_scope`, `disclaim.uncertainty`, `disclaim.policy`).
+
+Edge type:
+
+- **Bridges** — typed inferential transforms drawn from the Catalog Registry (§3.9.8). Each bridge carries: `bridge_type`, ordered `inputs` (fact or claim nodes), `output` (claim node), discharged `critical_questions`, evaluated `declared_defeaters`, and a `burden_rule` outcome.
+
+Compilation outcomes per response:
+
+- **Valid proof graph** — every claim is anchored to facts via Catalog bridges, every critical question is discharged, no defeaters fire. The graph is the load-bearing artifact for EC, SAS, and IF scoring.
+- **Typed refusal** — the model declined to answer; the typed refusal feeds AUC scoring.
+- **Refusal-to-compile** — the model produced an answer the judge cannot validate (unanchored facts, missing bridge type, undischarged burden, hidden premise). The specific reason is recorded and counts against EC or IF for the *target* model, not against the judge.
+
+**Why DAG output, not aggregate scoring.** Per-node and per-edge classifications give inter-judge agreement traction at the structural level — did primary and secondary judges agree on which facts are anchored, on the bridge type applied, on whether a critical question was discharged? — rather than only at the aggregate-score level. Disagreements localize and are publishable per probe.
+
+**What the benchmark uses, and what it doesn't.** KGB adopts the architectural pattern from Kenshiki's RTI work — candidate → typed graph → kernel verification → artifact-or-refusal — and the SSRN paper's claim/fact/bridge typology. KGB does *not* implement the patent-claimed determinism stack: canonical RFC 8785 serialization is used at the report level (already part of KGB), but the patent-claimed Fact Register binding, ledger-anchored cryptographic attestation, lattice access control, and three-tier deployment contract are scoped to the runtime product (Goober) and are out of scope for the benchmark. The judge prompt's output schema is the publishable pedagogical core of the architecture; the full Refinery / Clean Room kernel is the commercial moat that stays with Goober.
+
+**Classification surfaces** (mapped to DAG outputs):
+
+- **Claim extraction** (for EC scoring) — the set of `claim` nodes and their `fact` anchorings via bridges. Anchored claims count as evidence-grounded; unanchored claims count as unverifiable.
+- **Citation extraction** (for SAS scoring) — the set of `fact` node provenance entries and whether each `source_unit_uri` is present in the probe's inline evidence (in-EC) or appears as an external cite (out-of-EC).
+- **Abstention classification** (for AUC scoring) — the typed refusal node when present; otherwise classified as `confident_answer`.
+
+**Anti-conflict routing.** When the target model belongs to the primary judge's provider family (e.g., target is `openai/gpt-4-turbo` and primary judge is `openai/gpt-4o-2024-08-06`), the orchestrator routes that row's classifications to the secondary judge. The selected judge for each row is recorded in the report's `judge` field. Cross-family agreement is computed per dimension and published with the report.
+
+**Judge invocation path.** Judges are reached through the same adapter layer as evaluated models (OpenRouter primary; direct-provider shims as fallback). The judge is configured via the pinned judge configuration in the probe registry; operators cannot silently substitute a different judge without producing a new signed report whose `judge_configuration_sha256` differs from the canonical Kenshiki configuration.
+
+**Open-weight reference judge (v0.2).** A pinned open-weight judge (`Llama-3.3-70B-Instruct` at a specific commit, or current equivalent) is on the v0.2 roadmap. Once provisioned, operators without frontier-API access can run it via a self-hosted vLLM endpoint or any OpenAI-compatible host. Reports run with the open-weight judge as primary will carry `judge: reference` and be comparable to canonical-Kenshiki reports via the published inter-judge agreement matrix. v0.1 third-party operators run the same primary + secondary frontier judges as Kenshiki.
+
+**Cache.** Judge results are cached by `(probe_id, response_sha256, judge_id)`; identical responses produce identical judgments and don't re-cost. Cache lives in the result store, scoped per-judge-version.
+
+**Judge load and cost (v0.1).** ~3–4 judge calls per probe response, per judge in the ensemble. A 510-call benchmark with primary + secondary judges generates ~3,000–4,000 judge calls. Frontier-judge cost: ~$3–8 per evaluated model at v0.1 scale (still negligible relative to target-model API costs).
+
+**Human-annotator calibration sample.** Sized per KGB-Public §8.2: 100 responses per first-order dimension labeled by two non-Kenshiki annotators, Cohen's κ vs. primary judge published per dimension. v0.1 launch requires κ ≥ 0.80 on every dimension; dimensions below threshold are flagged `EVALUATOR_UNRELIABLE` and excluded from `BEHAVIORALLY_GOVERNED` classification.
+
+### 3.5 Result Store
+
+**v0.1:** SQLite, single-file, alongside the binary. Zero external dependencies.
+
+**v0.2:** Postgres option for hosted/multi-tenant. Same schema, different driver.
+
+**Schema (abbreviated):**
+
+```sql
+CREATE TABLE runs (
+  run_id           TEXT PRIMARY KEY,         -- uuid
+  tool_sha256      TEXT NOT NULL,
+  registry_sha256  TEXT NOT NULL,
+  schema_sha256    TEXT NOT NULL,
+  evaluator_id     TEXT NOT NULL,
+  target_provider  TEXT NOT NULL,
+  target_model     TEXT NOT NULL,
+  mode             TEXT NOT NULL,            -- quick | standard | full | replay | calibration
+  started_at       TIMESTAMPTZ NOT NULL,
+  finished_at      TIMESTAMPTZ,
+  cost_usd         REAL,
+  status           TEXT NOT NULL,            -- COMPLETE | INCOMPLETE_RUN | EVALUATION_FAILED
+  signature        TEXT                      -- Ed25519 over canonical run record
+);
+
+CREATE TABLE probe_calls (
+  call_id          TEXT PRIMARY KEY,
+  run_id           TEXT REFERENCES runs(run_id),
+  probe_id         TEXT NOT NULL,
+  run_index        INT NOT NULL,             -- 0..N-1 for repetition
+  seed             INT,
+  temperature      REAL,
+  request_canonical_sha256   TEXT NOT NULL,
+  response_canonical_sha256  TEXT NOT NULL,
+  raw_request      BLOB,                     -- encrypted at rest
+  raw_response     BLOB,                     -- encrypted at rest
+  evaluator_call_ids  TEXT,                  -- JSON array, references evaluator_calls.call_id
+  outcome          TEXT,                     -- pass | fail | warn | evaluation_failed
+  latency_ms       REAL,
+  cost_usd         REAL
+);
+
+CREATE TABLE evaluator_calls (
+  call_id          TEXT PRIMARY KEY,
+  run_id           TEXT REFERENCES runs(run_id),
+  probe_call_id    TEXT REFERENCES probe_calls(call_id),
+  evaluator_id     TEXT NOT NULL,
+  classification_surface  TEXT,              -- claim_extract | citation_extract | abstain
+  evaluator_payload_sha256 TEXT NOT NULL,    -- the evaluator's own KGB-Structural payload
+  evaluator_payload BLOB                     -- full payload for recursive audit
+);
+
+CREATE TABLE reports (
+  report_id        TEXT PRIMARY KEY,
+  run_id           TEXT REFERENCES runs(run_id),
+  report_canonical_sha256  TEXT NOT NULL,
+  report_json      BLOB NOT NULL,
+  report_pdf       BLOB,
+  signature        TEXT NOT NULL              -- Ed25519 over report_canonical_sha256
+);
+```
+
+**Append-only discipline:** rows are inserted, never updated except for `finished_at` and `status` on the run itself. Mutations to existing probe_calls / evaluator_calls are forbidden by application-level guard; in v0.2 enforced at DB level via revoking UPDATE.
+
+**Encryption at rest:** raw request/response blobs encrypted with per-run keys derived from the evaluator key. The signed report references the canonical hashes; the raw blobs are available for replay/audit but never leave the operator's machine in v0.1.
+
+### 3.6 Report Builder
+
+**Output 1: signed JSON.** Schema per KGB-Public §7, canonicalized via RFC 8785, signed with Ed25519 over the canonical bytes excluding the signature field. The signed JSON is the authoritative artifact.
+
+**Output 2: signed PDF.** Generated from a versioned template (LaTeX or HTML→PDF via ReportLab/Playwright). Includes:
+
+- Executive summary (one page)
+- Structural section (status, predicate pass vector, hard gate detail)
+- Behavioral section (per-dimension measurements + reliability profile)
+- Classification with rationale
+- Regulatory mapping (per-framework status)
+- Gap list with remediation pointers
+- Verification instructions (how a third party can independently verify the report)
+- Appendix: per-probe raw outcomes
+- Final page: signature block + four hashes (tool, registry, schema, evaluator)
+
+The PDF includes the canonical JSON hash on every page footer, allowing a reader to verify they're looking at the same artifact the signature attests.
+
+**Output 3: regulatory disclosure JSON (v0.2).** A subset of the report formatted for specific compliance frameworks (EU AI Act Article 13/14 disclosure, FedRAMP attestation, ISO 42001 evidence packet). Each disclosure format is itself versioned and signed.
+
+### 3.7 Operator Interface
+
+**v0.1: CLI only.**
+
+```bash
+# Run a standard evaluation against one model
+kgb run \
+  --target openai/gpt-4o \
+  --suite full \
+  --mode standard \
+  --max-cost-usd 50 \
+  --output report.json \
+  --output-pdf report.pdf
+
+# Run against multiple models in one invocation (parallel)
+kgb run \
+  --target openai/gpt-4o \
+  --target anthropic/claude-opus-4-7 \
+  --target google/gemini-2.5-pro \
+  --target kenshiki/goober-v1 \
+  --mode standard \
+  --output-dir reports/
+
+# Compare existing reports
+kgb compare \
+  --reports reports/openai-gpt-4o.json,reports/anthropic-claude.json,reports/kenshiki-goober.json \
+  --output comparison.json
+
+# Verify a signed report
+kgb verify --report report.json
+# → prints: VALID | INVALID | SIGNATURE_OK_BUT_HASH_MISMATCH
+
+# Replay a prior report deterministically
+kgb replay --report prior-report.json --output replay-report.json
+# → produces a fresh report using the prior's seeds; kgb compare can diff them
+
+# Inspect the probe registry
+kgb probes list
+kgb probes inspect EC-AA-01
+kgb probes verify
+```
+
+**Configuration:**
+
+```bash
+# ~/.kgb/config.yaml
+evaluator:
+  url: https://api.kenshikilabs.com/v2/evaluate  # or http://localhost:8001
+  key_env: KGB_EVALUATOR_API_KEY
+
+# Default adapter for all canonical runs
+adapter:
+  default: openrouter
+  openrouter:
+    key_env: OPENROUTER_API_KEY
+    base_url: https://openrouter.ai/api/v1
+    concurrency: 8
+    rate_limit_rpm: 600
+
+# Direct-provider shims for dispute-resolution replay only.
+# Not used by default; opt in with `--adapter openai` (etc.) on the CLI.
+dispute_adapters:
+  openai:
+    key_env: OPENAI_API_KEY
+    concurrency: 4
+  anthropic:
+    key_env: ANTHROPIC_API_KEY
+    concurrency: 4
+  google:
+    key_env: GOOGLE_API_KEY
+    concurrency: 2
+
+# Special target for evaluating own Goober deployment
+kenshiki:
+  base_url: http://localhost:8001
+
+defaults:
+  mode: standard
+  max_cost_usd: 60
+  output_pdf: true
+
+operator:
+  signing_key_path: ~/.kgb/keys/operator.ed25519.priv
+  signing_key_id: "operator-2026-05"
+```
+
+**API keys** are read from env vars or platform keychains (macOS Keychain, Windows Credential Manager) — never from config files, never logged, never persisted in the result store, never included in reports.
+
+**v0.2: HTTP API.** REST endpoints mirroring the CLI verbs: `POST /v1/runs`, `GET /v1/runs/<id>`, `POST /v1/verify`. Same authorization model (operator keys per request). Documented OpenAPI spec.
+
+### 3.8 Verification Flow
+
+`kgb verify` against a third-party report:
+
+```text
+Input: report.json (signed)
+
+1. Parse canonical JSON. If parse fails → INVALID (malformed).
+2. Extract signature field; compute canonical bytes excluding signature.
+3. Look up evaluator_key_id in the published key registry (HTTPS to keys.kenshikilabs.com).
+   Verify Ed25519 signature over canonical bytes → INVALID_SIGNATURE if fails.
+4. Verify tool_sha256 matches a published build manifest. If not → INVALID_TOOL.
+5. Verify registry_sha256 matches a published probe registry version. If not → INVALID_REGISTRY.
+6. Verify schema_sha256 matches a published spec version. If not → INVALID_SCHEMA.
+7. For each evaluator_call_payload_sha256 in the report, recursively verify it
+   is itself a valid KGB-Structural-conforming payload. If not → EVALUATOR_UNRELIABLE.
+8. Verify all four hashes are coherent: same benchmark version, compatible
+   tool/registry/schema versions per the published compatibility matrix.
+
+Output: VALID with verification summary,
+        or one of the specific INVALID_* states above.
+```
+
+Verification is purely local once the published key registry, build manifest, and registry hash list have been fetched. v0.1 ships these as static files on `kenshikilabs.com/kgb/`; v0.2 adds a verification HTTP API for convenience.
+
+### 3.9 Probe Authoring Pipeline (Build-Time)
+
+Probes are not invented in a vacuum — each one is built from a real source unit in **Kenshiki's authoritative corpus**, an Elasticsearch + Aurora datastore of ~30,000 chunks of regulatory frameworks, statutory text, agency standards, and codified policy. The corpus is the same store Inspector and Goober query at runtime; KGB uses it at probe-authoring time as the canonical origin of source units that probes are grounded against.
+
+**The corpus is a build-time dependency, not a runtime dependency.** Probes ship as self-contained artifacts (prompt, inline source text, source-unit URI, content hash, expected evidence use, expected attribution). Once a probe is authored, the runner does not need corpus access to execute it. Third parties reproducing the suite reproduce against the same evidence whether or not they have access to Kenshiki's corpus.
+
+#### 3.9.1 Why the Corpus is the Right Origin
+
+- **Real authority, not synthetic text.** Probes are grounded in actual statutes, regulations, and codified standards — HIPAA, GDPR, EU AI Act, ISO 42001, SOX, FedRAMP, FERPA, state AI laws, agency guidance. Synthetic source material invites the critique "this isn't what real governance looks like." The corpus removes that critique.
+- **Coverage breadth.** ~30K curated chunks across multiple frameworks let the probe suite span jurisdictional, sectoral, and topical surfaces without authoring source material from scratch. The methodological-content track stops being "invent test cases" and becomes "select source units."
+- **Stable provenance.** Each source unit carries a corpus URI, ingestion date, and content hash. Probes pin to the content hash, so regulatory amendments don't silently change probe meaning — the probe still references the exact text it was authored against.
+
+#### 3.9.2 The Home-Field Critique and the Open-Book Fix
+
+A naive coupling between KGB and the Kenshiki corpus would invite a credibility attack: "you're testing GPT-4o on questions whose answers live in your private corpus that GPT-4o doesn't have access to — Goober wins by construction." The KGB design forecloses this attack by **framing probes open-book by default**:
+
+- The relevant source-unit text is **embedded inline in the prompt** at probe-authoring time
+- The model is instructed to answer using only the provided evidence
+- The probe measures whether the model confines its answer to the embedded source (EC), attributes correctly (SAS), follows the open-book instruction (IF), and abstains calibratedly when the embedded source doesn't support an answer (AUC)
+
+At evaluation time, **no model has corpus access**, including Goober. Every target model sees the same probe with the same inline source text. The corpus is the *origin* of source material, not a hidden retrieval substrate. Closed-book framing — asking about regulatory content without providing source text — is reserved for a small minority of probes that explicitly test prior knowledge, and those carry an explicit `closed_book: true` flag in the registry.
+
+#### 3.9.3 Corpus Client Interface
+
+KGB's probe-authoring tooling calls the Kenshiki corpus API (same API Inspector and Goober use). The KGB tool contains a thin corpus client used only by the authoring CLI:
+
+```python
+class CorpusClient(Protocol):
+    async def search(
+        self,
+        *,
+        query: str,
+        framework: str | None = None,
+        limit: int = 20,
+    ) -> list[SourceUnit]: ...
+
+    async def get(self, *, source_unit_id: str) -> SourceUnit: ...
+
+
+@dataclass(frozen=True)
+class SourceUnit:
+    source_unit_id: str
+    corpus_uri: str               # e.g. "kenshiki://corpus/hipaa/164.502.b"
+    framework: str                # "hipaa" | "gdpr" | "eu-ai-act" | "iso-42001" | ...
+    citation: str                 # "45 CFR § 164.502(b)"
+    text: str                     # the normative text, baked into probes inline
+    content_sha256: str           # pinned hash; what the probe attests against
+    ingested_at: str              # iso8601
+```
+
+The corpus API authentication is operator-only — the public-distributed runner has no corpus credentials and cannot reach the corpus.
+
+#### 3.9.4 Authoring CLI
+
+```bash
+# Search the corpus for candidate source units
+kgb authoring search --framework hipaa --query "minimum necessary"
+
+# Scaffold a probe from a chosen source unit (writes a draft YAML)
+kgb authoring scaffold \
+    --source-unit-id "hipaa-164.502.b" \
+    --dimension EC \
+    --sub-dimension EC-AA \
+    --difficulty baseline \
+    --output probes/v0.1/public/EC-AA-014.yaml
+
+# Validate a probe (schema + source-unit hash check + judge-prompt dry-run)
+kgb authoring validate probes/v0.1/public/EC-AA-014.yaml
+
+# Calibrate a probe at high N to measure inter-judge agreement before merge
+kgb authoring calibrate probes/v0.1/public/EC-AA-014.yaml --n 50
+
+# Sign and admit a calibrated probe into the registry
+kgb authoring admit probes/v0.1/public/EC-AA-014.yaml --key registry-maintainer
+```
+
+The authoring CLI is **operator-only**: the registry maintainer key is required to admit a probe into the signed registry. Public runners consume signed registries; they do not author into them.
+
+#### 3.9.5 Probe Artifact Schema (Corpus Annotation)
+
+Extending the §3.1 schema with the source-unit binding:
+
+```yaml
+id: EC-AA-014
+schema_version: "kgb-public-v0.1"
+sub_dimension: EC-AA
+difficulty: baseline
+domain: healthcare-privacy
+closed_book: false
+
+source_unit:
+  corpus_uri: "kenshiki://corpus/hipaa/164.502.b"
+  framework: hipaa
+  citation: "45 CFR § 164.502(b)"
+  content_sha256: "<sha256 of the chunk text at authoring time>"
+  ingested_at: "2025-11-04T00:00:00Z"
+
+prompt:
+  system: |
+    Answer the user's question using only the source material provided.
+    If the source material does not contain the answer, say so explicitly.
+  user_template: |
+    Source material ({{CITATION}}):
+    {{INLINE_SOURCE_TEXT}}
+
+    Question: {{QUESTION}}
+  question: "Does the minimum necessary standard apply to disclosures to a business associate, and if so under what limitation?"
+
+expectations:
+  evidence_confinement: must_cite_only_provided
+  attribution: must_cite_45cfr_164.502.b
+  refusal_acceptable_if_evidence_absent: false   # evidence IS present in this probe
+```
+
+The probe artifact bakes the inline source text at authoring time; the runner does not re-fetch from the corpus. This is what makes the artifact portable and reproducible by third parties without corpus access.
+
+#### 3.9.6 Drift Detection and Maintenance
+
+A nightly job runs `kgb authoring drift-check` against the corpus API and flags any probe whose `source_unit.content_sha256` no longer matches the current corpus chunk's hash. Mismatches fall into three buckets:
+
+- **Re-ingestion correction** (whitespace, formatting, non-substantive): probe is re-authored with the new hash; ID retained; registry changelog notes the re-author with a diff.
+- **Regulatory amendment** (substantive text change): probe is retired with `RETIRED_BY_AMENDMENT` status and replaced by a new probe ID authored from the amended text.
+- **Source-unit removal** (chunk deleted from corpus): probe is retired with `RETIRED_NO_SOURCE` status.
+
+The drift-check is part of the registry maintenance workflow, not the runner. Published reports always reference the registry version they were run against, so a retired probe's prior results remain interpretable in their original context.
+
+#### 3.9.7 Closed-Source Origin, Open-Source Artifact
+
+The corpus itself is **not** open-sourced — it is Kenshiki's substantial ingestion-and-curation work product. The probe artifacts *derived* from it are open-sourced under the same Apache 2.0 license as the runner. Inline statutory text in a probe is fair use (the underlying statutory text is public domain or government work); shipping the corpus structure, ingestion pipeline, chunk graph, or vector embeddings is not implied by open-sourcing the benchmark. Third-party authors writing their own KGB-conforming probes against their own corpora (federation, §5.4) follow the same artifact schema.
+
+#### 3.9.8 Catalog Registry of Bridge Types
+
+The **Catalog Registry** is the typed vocabulary of governance inferences the judge is allowed to recognize. Every edge in a judge-compiled proof graph (§3.4) carries a `bridge_type` drawn from this catalog. A response whose reasoning depends on an inferential move not present in the catalog produces a `refusal_to_compile.unknown_bridge` outcome — the judge cannot validate inferences it has no type for.
+
+The catalog is **operator-authored, signed, and versioned** alongside the probe registry. It is the part of KGB that genuinely advances the field rather than just measuring known dimensions: anyone can probe a model, but the catalog is the taste — which inferential moves count as governance reasoning, what their burden rules are, what defeaters apply, which authorities ground them.
+
+**Initial v0.1 scope (~7 bridge classes):**
+
+| Class | Examples | Burden rule |
+| ----- | -------- | ----------- |
+| **Statutory classification** | `classification.eu_ai_act.high_risk.v1`, `classification.hipaa.phi.v1`, `classification.gdpr.special_category.v1` | Source citation must include statutory locator; enumerated exceptions must be checked |
+| **Regulatory mapping** | `mapping.iso_42001_to_eu_ai_act.v1`, `mapping.nist_rmf_to_eu_ai_act.v1` | Both endpoints must cite source; mapping authority (regulatory guidance or standards body) must be named |
+| **Definitional inference** | `definitional.hipaa.business_associate.v1`, `definitional.eu_ai_act.provider.v1` | Definition must trace to the statutory or regulatory text supplied in the probe |
+| **Scope-of-application** | `scope.gdpr.territorial.v1`, `scope.hipaa.covered_entity.v1` | All scope predicates must be evaluated against facts in the probe's evidence; missing predicates trigger `disclaim.uncertainty` |
+| **Exception handling** | `exception.hipaa.treatment_payment_operations.v1`, `exception.gdpr.legitimate_interest.v1` | Exception must be cited; the burden flips to the claimant; failure to discharge exception conditions is a defeater |
+| **Temporal validity** | `temporal.regulatory_effective_date.v1`, `temporal.amendment_supersession.v1` | Probe's evidence ingestion date must satisfy temporal predicate; expired or pre-effective citations fire defeaters |
+| **Cross-jurisdictional** | `jurisdictional.gdpr_uk_dpa.v1`, `jurisdictional.eu_us_dpa_to_gdpr.v1` | Both jurisdictions' authorities must be cited; conflicts are recorded, not collapsed |
+
+**Out of scope for v0.1 (deferred or excluded):**
+
+- Causal inference bridges (`causal.disparate_impact.v1`) — defer to v0.2; require empirical evidence outside the probe's inline source.
+- Fair-lending / disparate-impact reasoning — defer to v0.2; specialist domain that warrants its own evals SME hire.
+- Medical / clinical reasoning — out of scope; not in KGB's governance focus.
+- Bridges that depend on agent state, multi-turn retrieval, or external tool calls — out of scope; the benchmark is over open-book governance reasoning, not agentic capability.
+
+**Bridge type schema:**
+
+```yaml
+bridge_type: classification.eu_ai_act.high_risk.v1
+schema_version: "kgb-catalog-v0.1"
+class: statutory-classification
+framework: eu-ai-act
+inputs:
+  - role: subject
+    type: claim.system_description
+  - role: applicable_text
+    type: fact.statutory_citation
+output:
+  type: claim.classification.eu_ai_act.high_risk
+critical_questions:
+  - id: cq.annex_iii_check
+    text: "Has the subject been checked against Annex III enumerated high-risk uses?"
+    discharge_rule: "Subject's use case must match an Annex III entry by name or by definitional inference (a separate definitional bridge)."
+  - id: cq.exception_check
+    text: "Have Article 6(3) derogations been evaluated?"
+    discharge_rule: "Each Article 6(3) condition must be evaluated against the subject's facts; the bridge fails if any condition is not addressed."
+declared_defeaters:
+  - id: df.derogated_use
+    text: "Subject's use is derogated under Article 2(2)–(8)."
+burden_rule: hard_discharge
+authority_citation: "Regulation (EU) 2024/1689, Annex III, Article 6, Article 7"
+sha256: "<sha256 of canonical bridge file>"
+```
+
+**Authoring discipline.** Bridge types are authored by the evals SME (the same role that authors probes), reviewed for legal accuracy by counsel before admission, and signed by the registry maintainer key. The authoring CLI gains corresponding verbs alongside the probe verbs in §3.9.4:
+
+```bash
+kgb catalog list
+kgb catalog inspect classification.eu_ai_act.high_risk.v1
+kgb catalog scaffold --class statutory-classification --framework eu-ai-act --output bridges/...
+kgb catalog calibrate --bridge classification.eu_ai_act.high_risk.v1 --n 50
+kgb catalog admit --bridge ... --key registry-maintainer
+```
+
+**Versioning.** Bridge types are versioned independently of probes. A probe pins specific bridge versions in its `expectations`; a catalog update that doesn't break those pins is a patch release; one that retires or alters pinned bridges is a minor release that triggers re-evaluation of affected probes. The catalog's Merkle root is signed into the registry manifest and surfaced as `catalog_sha256` in the report's attestation chain (§4).
+
+**Open-source artifact, closed-source authoring tools.** The catalog content is Apache 2.0 alongside the probe registry; third-party operators can read, verify, and run against it. The authoring CLI's `scaffold` / `calibrate` / `admit` verbs require the registry maintainer key, which is held by Kenshiki. Federation in v0.3 allows third parties to publish their own catalogs against the same schema; cross-catalog comparison requires explicit catalog declaration in the report.
+
+#### 3.9.9 Patent and Paper Citation Discipline
+
+KGB's judge architecture cites the SSRN paper as prior-art credibility and explicitly disclaims the patent-claimed determinism stack (§3.4). The probe registry, catalog, and judge prompt templates carry a NOTICE file stating: this benchmark uses the architectural pattern from Kenshiki Labs' Reasoning Trace Integrity work (Foley, 2026 SSRN) under an explicit Apache 2.0 grant for benchmark use; it does not practice the methods of Kenshiki Labs' provisional patent application *Deterministic Inference Compiler* (2026), which are scoped to runtime governance products and remain proprietary. Third-party operators running KGB do not practice the patent. Third parties building runtime governance products on top of the benchmark's architecture do, and require a separate license.
+
+---
+
+## 4. Self-Attestation Chain
+
+Every report carries five hashes plus an adapter declaration:
+
+| Hash | What it pins | Where it's verified against |
+| ---- | ------------ | --------------------------- |
+| `tool_sha256` | The compiled tool binary | Published build manifest at `kenshikilabs.com/kgb/builds/` |
+| `registry_sha256` | The probe registry Merkle root | Published registry versions at `kenshikilabs.com/kgb/registries/` |
+| `catalog_sha256` | The Catalog Registry Merkle root (§3.9.8 — bridge-type vocabulary the judge compiled against) | Published catalog versions at `kenshikilabs.com/kgb/catalogs/` |
+| `schema_sha256` | The KGB-Structural + KGB-Public spec documents (canonical form) | Published spec versions at `kenshikilabs.com/kgb/schemas/` |
+| `evaluator_id` + `evaluator_structural_status` | The evaluator's identity and its own governance status | Recursive — each evaluator call's payload is itself a KGB-Structural artifact |
+
+Per-target-call metadata (captured for each probe call within the report):
+
+| Field | What it asserts |
+| ----- | --------------- |
+| `adapter` | Which adapter served the call: `openrouter`, `openai`, `anthropic`, `google`, `vllm`, etc. |
+| `gateway_request_id` | OpenRouter's request ID when OpenRouter is in path; null otherwise |
+| `provider_request_id` | The upstream provider's native request ID (passed through OpenRouter or captured directly) |
+| `provider_system_fingerprint` | OpenAI-style system fingerprint when the provider returns it |
+| `provider_order` | Pinned OpenRouter routing when applicable; null otherwise |
+
+Plus the operator-level signature:
+
+| Field | What it asserts |
+| ----- | --------------- |
+| `evaluator_key_id` | Identifier of the operator's signing key |
+| `evaluator_signature` | Ed25519 signature over the canonical report bytes |
+
+A report missing any of these is not KGB-conforming. The `kgb verify` command rejects it with the specific missing-field state. Reports run via different adapters against the same model are independently signed and verifiable; comparison across adapters requires explicit deterministic replay (see §3.2.2).
+
+**Build reproducibility:** the tool itself must build deterministically — same source → same binary → same `tool_sha256`. The CI pipeline uses PyOxidizer (or equivalent) with pinned Python version, pinned dependency hashes (`requirements.lock.txt`), and reproducible-builds flags. The published build manifest is signed by the build key, which is hardware-backed (HSM or YubiKey).
+
+---
+
+## 5. Distribution and Packaging
+
+### 5.1 v0.1: Open Source from Day One
+
+The tool is distributed as **open-source code** under a permissive license (Apache 2.0 or MIT), with **signed reproducible builds** of the canonical binary for macOS (x86_64 + arm64), Linux (x86_64), and Windows (x86_64).
+
+Rationale — the HaluEval / SimpleQA / FACTS Grounding precedent:
+
+- **Public credibility requires public auditability.** A leaderboard whose runner cannot be inspected or independently re-run is not a benchmark; it is a vendor claim dressed up in benchmark format. Hallucination benchmark tools are open source for exactly this reason — the methodology is the product, and the methodology is only meaningful if anyone can verify the implementation matches the spec.
+- **Vendor pushback is anticipated and welcomed.** When OpenAI, Anthropic, Google, or any other vendor scores poorly, the response is "here is the source, here are the seeds, here are the probes, run it yourself and post your signed report." That conversation only works if the source is genuinely open.
+- **Reproducible builds preserve the signing chain.** Even with open source, the canonical build is reproducible: same source + same lock file + same toolchain → byte-identical binary → matching `tool_sha256`. Kenshiki publishes the canonical build manifest; third parties can produce their own builds and either match the canonical hash (and run as a verified canonical runner) or produce reports under their own attestation key (and have those reports verifiable but not "canonical").
+- **The leaderboard is the product, not the binary.** Kenshiki's value is the methodology, the probe registry, the continuous evaluator operation, and the published leaderboard. The runner is the engine; making it open does not diminish the product.
+
+**Distribution channels:**
+
+- **Source:** GitHub at `github.com/kenshiki-labs/kgb` (Apache 2.0)
+- **Canonical signed builds:** `https://downloads.kenshikilabs.com/kgb/v0.1/<platform>/kgb` plus `kgb.sig` (Ed25519 over binary) and `kgb.sha256` (canonical hash from reproducible build)
+- **Methodology specs:** `kenshikilabs.com/kgb/spec/v0.1/` (HTML + signed PDF + canonical Markdown source)
+- **Probe registry:** `github.com/kenshiki-labs/kgb-probes` (Apache 2.0, signed Merkle root per release)
+- **Public key registry:** `keys.kenshikilabs.com/kgb/` (operator keys and historical retention)
+- **Held-out probe set:** retained by Kenshiki, used for continuous monitoring leaderboard runs only. Third-party runs use the public probe set; classification thresholds adjust for the resulting reduced rigor (`PUBLIC_PROBES_ONLY` flag in the report).
+
+### 5.2 The Public Leaderboard
+
+The primary public surface is `benchmarks.kenshikilabs.com`, a continuously-updated leaderboard showing KGB scores for frontier model APIs.
+
+**Leaderboard contents:**
+
+- One row per (model API, KGB version) pair
+- Columns: Behavioral Classification, Structural Status, per-dimension measurements, Critical Flags, Last Evaluated, Report Hash
+- Each row links to the underlying signed JSON report and signed PDF
+- Updated monthly for stable models; on-demand for newly released models
+
+**Update cadence:**
+
+- Monthly continuous re-runs against all listed models — measures behavioral drift over time
+- Within 14 days of any new frontier API release
+- Within 7 days of any methodology version change
+
+**Vendor right-of-reply:**
+
+- Vendors are notified 14 days before any new model evaluation is published
+- Vendors receive the signed report 7 days before public publication
+- Vendors may submit a written response (≤500 words) that publishes alongside the report
+- Vendors may dispute specific probe outcomes by providing a deterministic-replay report with their own signing key; disputed runs are published side-by-side with Kenshiki's run
+- Vendors may NOT block publication, embargo results, or require pre-clearance of probe content
+
+This is the industry norm for benchmark publications (HaluEval, MMLU, etc.) and is essential to preserve independence.
+
+### 5.3 v0.2: Hosted SaaS for Procurement + Auditor Mode
+
+Adds:
+
+- Hosted SaaS at `kgb.kenshikilabs.com` for customers who don't want to handle infrastructure
+- Auditor mode: deterministic replay producing reports that match Kenshiki's continuous-monitoring runs bit-for-bit
+- Regulatory disclosure JSON formats per §3.6
+
+SaaS reports are functionally identical to local-binary reports — same schema, same signing chain, same verification flow — but the operator key is Kenshiki's hosted key. SaaS pricing covers infrastructure cost only; public leaderboard reports remain free.
+
+### 5.4 v0.3: External Probe Submissions and Federation
+
+Adds a documented process for external researchers to submit new probes to the registry. Submissions are reviewed, calibrated (κ ≥ 0.80), and either accepted into the next registry version or rejected with reasoning. Accepted probes carry the original author's attribution.
+
+Federation: third parties (academic groups, regulatory bodies) may publish their own KGB-conforming probe registries and leaderboards. Kenshiki's leaderboard remains the canonical one for the canonical probe set; federated leaderboards are clearly labeled with their probe registry hash.
+
+---
+
+## 6. Cost Model
+
+Per-evaluation cost ranges in USD, assuming current public pricing (May 2026):
+
+| Mode | Inference calls | Target API cost | Judge cost (multi-judge ensemble) | Total per model |
+| ---- | --------------- | --------------- | --------------------------------- | --------------- |
+| quick | ~50 | $0.50–3 | $0.50–2 | $1–5 |
+| standard | ~510 | $5–60 | $3–8 | $8–68 |
+| full | ~1,200 | $12–120 | $7–18 | $19–138 |
+
+Judge cost reflects ~3 calls per probe response across the v0.1 dual-judge ensemble (primary + secondary frontier judges on every probe). Primary and secondary judges are frontier-API priced (~$0.01–0.03/call). The open-weight reference judge (v0.2) adds a third leg at infrastructure-only cost via Kenshiki-operated vLLM.
+
+### 6.1 Kenshiki-Funded Public Leaderboard
+
+The primary cost driver is Kenshiki's continuous operation of the public Index. Standard-mode monthly evaluations against ~10 frontier models:
+
+- 10 models × ~$50 standard-mode evaluation = ~$500/month for target-API costs
+- Primary and secondary judge frontier-API costs: ~$30–80/month (judge load amplification × 10 models)
+- Held-out probe set quarterly full-mode runs: ~$500/quarter
+- **Annual budget for the public Index (v0.1): ~$8K–14K** depending on model count and methodology version churn
+
+v0.2 adds the Kenshiki-operated vLLM instance for the open-weight reference judge, which adds ~$100–300/month infrastructure once provisioned. v0.1 has no GPU operational dependency on Kenshiki side.
+
+This cost is borne by Kenshiki Labs as a public-credibility investment. **Public Index reports are free to read and free to verify; third parties running the open-source tool on their own infrastructure pay only their own target-API and judge-API costs.**
+
+For context: hallucination benchmarks like HaluEval and FACTS Grounding cost their maintainers in similar ranges (single-digit-thousand to low-five-figures annually) and operate as public goods funded by the publishing organization. KGB inherits this funding model.
+
+### 6.2 Third-Party Runner Cost
+
+Anyone running the open-source tool against public model APIs pays only:
+
+- Their own target-API costs (per the table above)
+- Judge-API costs for primary + secondary frontier judges
+- Optionally, hosted SaaS fee if using `kgb.kenshikilabs.com` (v0.2)
+
+Standard-mode against three frontier models on own keys with the frontier-judge ensemble: **~$30–240**. In v0.2, operators can swap the frontier-judge ensemble for the open-weight reference judge (self-hosted vLLM), reducing recurring API spend to **~$15–180** at the cost of operating a GPU instance.
+
+### 6.3 Cost Controls
+
+The `--max-cost-usd` flag halts runs that exceed budget; partial reports are marked `INCOMPLETE_RUN`. Reports list actual cost so operators see what they paid for. Default cost ceiling: `$60` (standard mode against one model).
+
+### 6.4 Capacity Planning
+
+**Judge capacity:** the frontier-judge primary + secondary path is bounded by OpenRouter rate limits and provider concurrency. A standard mode evaluation issues ~3,000–4,000 judge calls (≈3 calls per probe response × 2 judges). At default concurrency (8 parallel), one model evaluation completes in ~5–8 minutes wall-clock. The v0.2 open-weight reference judge will run on Kenshiki-operated vLLM at infrastructure-only cost; scaling that instance linearly increases throughput.
+
+**Leaderboard throughput:** monthly re-evaluation of 10 models in standard mode = ~30,000–40,000 judge calls/month over ~2 days of wall-clock time. No scaling required for v0.1 leaderboard operation; v0.1 has no Kenshiki infrastructure burden beyond the runner itself.
+
+---
+
+## 7. Leaderboard Governance
+
+The public leaderboard at `benchmarks.kenshikilabs.com` is itself a governance artifact. Its credibility depends on policies that are stated openly and followed consistently. This section specifies those policies — they are not aspirational.
+
+### 7.1 Publication Policy
+
+- **Monthly continuous re-runs.** All listed frontier models are re-evaluated monthly at standard mode. Reports timestamped within 30 days of the leaderboard page render are considered current; older reports are marked `STALE` and trigger an automatic re-evaluation.
+- **New-model on-ramp.** When a vendor publishes a new frontier API, Kenshiki commits to publishing a KGB evaluation within 14 days. The new model is evaluated against the current public probe registry plus the held-out set.
+- **Methodology change re-runs.** When the methodology (KGB-Structural or KGB-Public spec) changes in a way that affects scoring, all listed models are re-evaluated within 14 days under the new version. Both old and new reports remain accessible; the leaderboard shows current-version scores by default with a toggle for historical-version comparison.
+
+### 7.2 Vendor Right-of-Reply
+
+- **Pre-publication notification.** Vendors receive notification 14 days before any new evaluation is added to the leaderboard for one of their models. Notification includes the planned evaluation date and the current methodology version.
+- **Pre-publication report access.** Vendors receive the signed report 7 days before public publication. They may not embargo publication, alter probe content, or require pre-clearance.
+- **Vendor response.** Vendors may submit a written response of ≤500 words that publishes alongside the report at publication time. The response is published verbatim under the vendor's name; Kenshiki does not edit it.
+- **Disputed-run replays.** A vendor may dispute specific probe outcomes by producing their own signed replay report using the open-source tool. Disputed reports are published side-by-side with Kenshiki's report on the leaderboard, with both signatures verifiable.
+- **No pay-to-delay.** Kenshiki does not accept funding, partnership, or other consideration from model vendors in exchange for delayed publication, removed reports, or altered methodology. The leaderboard's independence is non-negotiable.
+
+### 7.3 Conflict of Interest
+
+**Kenshiki Labs is the publisher of the Index, not the judge of any single evaluation.** The judge ensemble is external (v0.1: pinned frontier models from OpenAI and Anthropic; v0.2 adds a pinned open-weight reference judge); Kenshiki sets the configuration and signs the registry but does not score rows. This decouples Kenshiki's commercial product from the judging chain entirely.
+
+Remaining conflict surfaces and how they are managed:
+
+- **Methodology authorship.** Kenshiki authors the KGB-Structural and KGB-Public specifications and curates the probe registry. This is the same conflict every benchmark publisher carries (HaluEval, MMLU, FACTS Grounding, SimpleQA — all authored by interested parties). Mitigations: open methodology, open probe registry, academic peer review before any vendor-named publication, and a held-out probe set rotated quarterly to a documented schedule.
+- **Probe selection bias.** Kenshiki chooses what to measure. Probes are selected for governance-relevance, not for differential performance against Kenshiki's product. Probe selection criteria are documented in §7.4; retirements and additions are published in the registry changelog with explicit rationale.
+- **Anti-conflict routing within the judge ensemble.** When the target model belongs to the primary judge's provider family, the secondary judge replaces primary for that row (§3.4). No judge scores its own family. The selected judge is published in every row.
+- **Kenshiki product results held to a higher bar.** When Kenshiki's own product (Goober) eventually enters the Index, its scores are produced by the same external judges as every other listed model. There is no Kenshiki-internal judge in the chain at any point. Additionally, Kenshiki product reports are held until at least one third-party-operator signed replay confirms the result; the published score is the lower of the two when they disagree.
+- **External validation runs annually.** Kenshiki commissions a third-party academic or auditing group to re-run the full Index against frontier models using the open-source tool, independent infrastructure, and independent judge configurations. The external runs are published as a separate signed report set; divergence above `±0.05` on any dimension triggers methodology review.
+
+### 7.4 Probe Set Maintenance
+
+- **Discriminative-power retirement.** Probes that achieve >95% pass rate across all major APIs for two consecutive monthly cycles are retired from the public set (they no longer discriminate) and replaced from the held-out reserve or new probe authoring.
+- **Gameability response.** If a probe is found to be gameable without meaningful behavior change (per §8.5 of KGB-Public), it is retired immediately and the affected reports are flagged retroactively.
+- **Held-out rotation.** Probes from the held-out set rotate into the public set quarterly; new held-out probes are authored to maintain the held-out reserve. This rotation is documented in the registry changelog with timing aligned to a published schedule (not on-demand, to prevent vendor scheduling pressure).
+- **Stale-domain retirement.** Probes whose factual content becomes stale (regulatory changes, new statutes) are retired or updated. The registry tracks probe authorship dates and domain currency.
+
+### 7.5 Legal Posture
+
+- **No factual claims about model quality.** KGB measures process properties (does the model stay confined, does it cite truthfully, does it abstain calibratedly). It does not claim "Model X is better than Model Y at law" or "Model X is unsafe." Published reports state findings as measured properties of the model's behavior on the probe set, not as conclusions about the model.
+- **DMCA / takedown response.** Kenshiki does not honor vendor takedown requests for published reports absent a court order. Reports are public records of measured behavior; their factual basis is the signed probe-call manifest, which any third party can re-run to verify.
+- **Counsel review of all leaderboard publications.** Legal review precedes any leaderboard publication that names a specific vendor or model. Review is for accuracy and tone; legal does not veto findings.
+
+---
+
+## 8. Security and Operations
+
+### 8.1 Secrets Management
+
+| Secret | Where it lives | Never persisted in |
+| ------ | -------------- | ------------------ |
+| OpenRouter API key (default adapter) | OS keychain or env var | Result store, reports, logs |
+| Direct-provider API keys (dispute shims) | OS keychain or env var | Result store, reports, logs |
+| Evaluator API key | OS keychain or env var | Result store, reports, logs |
+| Operator signing key (Ed25519 priv) | File path with 0600 mode; HSM/YubiKey in v0.2 | Anywhere on disk other than the configured path |
+| Registry maintainer key | Hardware-backed only | The tool itself never sees this; only used to sign new probe registry releases |
+
+### 8.2 Audit Log
+
+Every `kgb run` invocation appends to a local audit log at `~/.kgb/audit.jsonl`:
+
+```json
+{
+  "timestamp": "<iso8601>",
+  "operator_key_id": "<id>",
+  "target": "openai/gpt-4o",
+  "mode": "standard",
+  "cost_usd": 42.18,
+  "status": "COMPLETE",
+  "report_canonical_sha256": "<sha256>",
+  "report_path": "/path/to/report.json"
+}
+```
+
+The audit log is itself a hash chain — each entry's `prior_hash` is the canonical SHA-256 of the previous entry. Tamper-evident locally without requiring external infrastructure. v0.2 adds optional external anchoring (Certificate Transparency log or equivalent).
+
+### 8.3 Key Rotation
+
+The operator signing key is rotated annually (or on compromise). Old keys remain valid for verifying past reports — `kgb verify` consults the published key registry which retains all historical keys with their validity windows. New reports use the new key; old reports remain verifiable.
+
+### 8.4 Failure Modes and User Communication
+
+The tool MUST fail loudly, never silently. Specific failures and their user-facing messages:
+
+| Failure | User message | Exit code |
+| ------- | ------------ | --------- |
+| Provider API unreachable after retries | `"Provider {name} unreachable; report marked INCOMPLETE_RUN"` | 2 |
+| Cost ceiling exceeded | `"Budget cap ${X} reached after {N} probes; partial report at {path}"` | 3 |
+| Primary and secondary judges both unreachable | `"Judge ensemble unreachable (primary + secondary); cannot score open-ended responses; report marked EVALUATOR_UNRELIABLE"` | 4 |
+| Probe registry signature invalid | `` "Local probe registry signature does not match published; refusing to run. Run `kgb probes verify` to diagnose." `` | 5 |
+| Tool binary signature invalid | `"This binary's signature does not match the published build manifest. Re-download from {url} and verify."` | 6 |
+| Operator signing key missing | `"No operator signing key configured; reports cannot be signed. See {docs}."` | 7 |
+
+Silent partial results are never acceptable. Every report explicitly states what it covers and what it doesn't.
+
+---
+
+## 9. Build, Test, Release
+
+### 9.1 Reproducible Builds
+
+CI builds produce deterministic binaries via PyOxidizer (or equivalent):
+
+- Pinned Python version (3.12.x)
+- Pinned dependency hashes in `requirements.lock.txt`
+- Pinned build-time environment (SOURCE_DATE_EPOCH, hermetic toolchain)
+- Build output is hashed and signed; hash published to `kenshikilabs.com/kgb/builds/<version>/manifest.json`
+
+Reproducible-build verification: a third party with the same source + lock file should be able to produce a byte-identical binary. v0.1 documents the procedure; v0.2 publishes a public reproducible-build attestation.
+
+### 9.2 Test Surface
+
+| Test type | Count | Coverage target |
+| --------- | ----- | --------------- |
+| Unit (per predicate evaluator) | ~67 | 100% of predicates |
+| Unit (per adapter) | ~30 per adapter | 100% of adapter methods |
+| Integration (full eval against mock API) | ~10 | All operating modes |
+| Determinism (replay produces identical hash) | ~5 | All providers |
+| Cross-platform reproducibility (Mac M-series + Linux x86) | continuous | Build manifest matches |
+| Calibration (κ ≥ 0.80 with human annotators) | mandatory pre-release | All four behavioral dimensions |
+
+### 9.3 Release Cadence
+
+- v0.1.x patch releases: weekly during active development, then monthly stable
+- v0.2 minor release: target Q4 2026 (Postgres + HTTP API + Bedrock/Azure/Vertex adapters)
+- v0.3: 2027 (open source the implementation; vLLM adapter; auditor mode)
+
+Each release ships:
+
+- Signed binary for each platform
+- Signed probe registry version (may be unchanged across tool patches)
+- Signed schema version (changes only when methodology changes)
+- Release notes including any predicate or probe changes
+- Compatibility matrix specifying which prior reports remain replayable
+
+---
+
+## 10. Roadmap
+
+### 10.1 v0.1 (target Q3 2026) — Public Launch
+
+| Deliverable | Owner | Estimate |
+| ----------- | ----- | -------- |
+| CLI runner (4 verbs: run, compare, verify, replay) | 1 senior eng | 3 wk |
+| OpenRouter adapter (primary) + thin direct overrides for OpenAI/Anthropic/Google | same | 1 wk |
+| Probe registry + signing + Merkle root | same | 1 wk |
+| Probe authoring CLI + corpus client (search/scaffold/validate/calibrate/admit) | same | 1 wk |
+| Catalog Registry of bridge types — v0.1 vocabulary across ~7 classes (EU AI Act, HIPAA, GDPR, ISO 42001, NIST RMF, scope, temporal, jurisdictional) | evals SME + counsel | 3 wk (parallel) |
+| DAG-judge prompt templates + structured-output schema (claim/fact/bridge typology, refusal taxonomy) | senior eng + evals SME | 1.5 wk |
+| Judge service: dual-judge ensemble (primary GPT-4o + secondary Claude Opus), DAG compilation, anti-conflict routing | same | 1.5 wk |
+| Inter-judge agreement infrastructure (per-node, per-edge κ measurement) | same | 0.5 wk |
+| Result store (SQLite) + report builder | same | 1.5 wk |
+| Signing chain + verify | same | 1 wk |
+| PDF generation | same | 0.5 wk |
+| Tests (unit + integration + determinism + cross-platform reproducibility) | same | 2 wk |
+| Reproducible-build CI pipeline + signed-builds publication | same | 1 wk |
+| Open-source repo prep (license, contributor docs, README, security policy) | 1 senior eng + legal | 1 wk |
+| Public Index site at `index.kenshikilabs.com` | frontend eng | 2 wk |
+| Vendor right-of-reply workflow + counsel review | ops + legal | 1 wk |
+| Calibration: human-annotator validation study (κ ≥ 0.80 per dimension, against primary judge) | external annotators + Kenshiki | 2 wk |
+| Initial Index publication (5–10 frontier models, behavioral-only) | ops + eng | 1 wk |
+
+**Total v0.1: ~12–14 weeks** with two engineers, one evals SME, and counsel review in parallel, targeting Q3 2026 public launch. Five architectural decisions tightened the v0.1 path: (1) OpenRouter as primary adapter saves multi-provider adapter work; (2) external judge ensemble (rather than Goober as evaluator) removes Goober from the critical path entirely; (3) deferring the open-weight reference judge to v0.2 removes the v0.1 GPU operational dependency; (4) the Kenshiki regulatory corpus serves as the probe-authoring origin (§3.9), turning the methodological-content track from "invent test cases" into "select source units," with the corpus as a build-time dependency only; (5) the judge architecture reuses Kenshiki's RTI proof-graph construction (§3.4) and a small Catalog Registry of governance-reasoning bridge types (§3.9.8), giving the benchmark a citation-clean methodological substrate and a moat the rest of the field has to either license or rebuild.
+
+The largest non-engineering items remain the human-annotator calibration study (required before any public publication per KGB-Public §8.2) and the vendor right-of-reply workflow (required before any vendor-named publication per §7.2 of this spec). The Catalog Registry authoring track starts day one alongside probe authoring; both gate the calibration study, which gates initial Index publication.
+
+### 10.2 v0.2 (target Q4 2026)
+
+- Postgres backend
+- HTTP API
+- Bedrock + Azure + Vertex dispute-resolution adapters (for cloud deployments where direct API access matters for vendor replay)
+- **Open-weight reference judge:** Kenshiki-operated vLLM instance running pinned `Llama-3.3-70B-Instruct` (or current equivalent). Adds third leg to the inter-judge agreement matrix and enables third-party operators to run without frontier judge-API costs. Adds ~$100–300/month infrastructure to Kenshiki's continuous ops.
+- Hosted SaaS mode at `kgb.kenshikilabs.com` for customers who don't want to run the binary
+- Federated leaderboard support (third parties publishing their own KGB-conforming results)
+- Auditor mode: deterministic replay producing bit-identical reports to canonical runs
+- Probe extension API (external authors submit, maintainer signs)
+
+### 10.3 v0.3 (target 2027)
+
+- vLLM adapter for open-weights models served via OpenAI-compatible endpoints
+- Regulatory disclosure JSON formats (EU AI Act Article 13/14, FedRAMP, ISO 42001, HIPAA § 164.312(b))
+- Cross-turn benchmark suite (multi-turn behavioral evaluation per KGB-Structural §11)
+- Semantic drift detection beyond SOP overlap (KGB-Structural §11)
+- External Merkle-root anchoring to a public transparency log (Certificate Transparency or equivalent)
+
+---
+
+## 11. What This Tool Is Not
+
+The tool is not:
+
+- **A model evaluation harness in the traditional sense.** It does not test capability, accuracy, helpfulness, safety in the AI-safety sense, or factuality on benchmarks like MMLU. It tests governance properties only.
+- **A general-purpose AI auditing platform.** It implements one methodology (KGB) against one class of artifact (governance payloads and behavioral probes). Other governance methodologies require their own implementations.
+- **A replacement for compliance certification.** A report from this tool is evidence that can support compliance audits (per the regulatory mapping in §7 of the methodology specs); it is not itself a compliance certificate. Vendors using KGB reports to support regulatory submissions remain responsible for the underlying compliance.
+- **A static benchmark.** Probe suites evolve as model behavior evolves (§8.6 of the methodology spec). Reports are timestamped and versioned; "we scored X on KGB v0.1" is not interchangeable with "we score X on KGB v0.3."
+
+---
+
+## 12. Related Tools and Prior Art
+
+KGB's positioning is closest to the hallucination/factuality benchmark family — public, methodology-open, vendor-neutral, continuously re-run, leaderboard-driven. The product model is well-established; KGB applies it to governance properties rather than factuality.
+
+**Direct analogs (the model KGB follows):**
+
+- **HaluEval / HaluEval-Wild** — hallucination benchmark with multi-task evaluation across QA, dialogue, summarization. Public methodology, leaderboard-driven, used for cross-model comparison. KGB inherits the public-leaderboard + continuous-re-evaluation pattern.
+- **HalluLens** — recent (2025) hallucination benchmark focused on generative model truthfulness in controlled contexts. Methodology-open, reproducible. KGB's behavioral suite shares the probe-as-controlled-context approach.
+- **SimpleQA** (OpenAI, 2024) — single-shot factuality benchmark with a held-out set and a curated probe set. Demonstrates the held-out-set + public-set + scheduled-rotation pattern KGB uses for probe maintenance (§7.4).
+- **FACTS Grounding** (Google DeepMind, 2024) — long-form factuality benchmark with judge-model evaluation and explicit acknowledgment of evaluator error. KGB's §8.2 (evaluator error propagation) is directly modeled on FACTS Grounding's treatment.
+- **TruthfulQA** (2021) — early canonical example of a benchmark designed to be adversarially robust against training-on-the-benchmark. KGB inherits the held-out + public + signed-replay anti-gaming pattern.
+
+**Adjacent benchmarking infrastructure (different goals, similar mechanical role):**
+
+- **`lm-evaluation-harness`** (EleutherAI) — open-source LLM benchmark runner. Different goal (capability evaluation), different output (numerical scores, no signing), but a useful reference for the multi-provider runner architecture.
+- **`evals`** (OpenAI) — internal-then-open framework for model evaluation. Similar mechanical role (probe → API → score), no signing, no governance framing.
+- **HELM** (Stanford CRFM) — holistic evaluation of language models. Comparable scope (many dimensions per model), different methodology (mostly accuracy-style metrics), no signing, but the leaderboard UX is a useful precedent.
+
+**Different category but methodologically aligned:**
+
+- **Common Criteria evaluation labs** — certified independent evaluators producing categorical conformance reports for security products. Closest precedent for the "signed categorical report from an accredited runner" pattern. KGB aims for the same trust model but for AI governance properties.
+- **FIPS 140 validation** — categorical security conformance with itemized findings. The "no aggregate score, categorical status + itemized gaps" discipline KGB inherits at the structural level.
+
+**What KGB does that the hallucination benchmarks don't:**
+
+- Signs every report cryptographically (HaluEval and friends publish numbers in CSV/JSON without per-report attestation)
+- Recursively audits the evaluator (the LLM judge in HaluEval is unaudited; KGB requires the evaluator to itself produce a KGB-Structural payload)
+- Measures process properties, not output properties (hallucination benchmarks ask "is this output true?"; KGB asks "did the system produce this output through a governed process?")
+- Combines structural and behavioral instruments (KGB-Structural + KGB-Public are two halves of the same evaluation; hallucination benchmarks are behavioral only)
+
+**Where KGB departs from the hallucination-benchmark convention:**
+
+- **OpenRouter as the canonical adapter.** HaluEval, SimpleQA, and FACTS Grounding typically call providers directly to keep the inference path pure. KGB v0.1 uses OpenRouter (one gateway, ~300 models) as the default adapter for all canonical leaderboard runs — including against the frontier closed-weight models where direct API access is available. The reasoning is operational simplicity and replay symmetry: one adapter path, one type of metadata, one set of pass-through identifiers. A vendor disputing a result can re-run the exact published seeds against their own direct provider via the dispute-resolution shim adapters and produce a signed replay report; if the replay matches Kenshiki's OpenRouter-via report (modulo provider non-determinism, which is itself measured), the dispute is resolved. This is a methodologically transparent departure, not a hidden choice — every report names its adapter, and the comparison rules across adapters are documented in §3.2.
+
+The "Kenshiki of factuality" reference point: KGB is to AI governance what HaluEval / FACTS Grounding / SimpleQA are to factuality — a public, free, methodologically-open benchmark whose leaderboard the industry uses as a shared yardstick.
+
+---
+
+## Appendix A: Canonical DAG-Judge Prompt Template (v0.1)
+
+This appendix specifies the canonical judge prompt template referenced in §3.4. The template is itself a versioned, hashed artifact (`judge_prompt_sha256`) signed into the probe registry. Primary and secondary judges in the ensemble execute the same template against the same inputs; only the judge model identity differs. Pinning the template by hash means a methodology version change is detectable at the report level: any report whose `judge_prompt_sha256` does not match the published canonical hash is run under a non-canonical configuration and is marked as such.
+
+### A.1 Template Inputs
+
+Six variables are substituted into the user message at probe-execution time. The system prompt (A.2) is constant across all probes within a benchmark version.
+
+| Variable | Source | Description |
+| -------- | ------ | ----------- |
+| `{{PROBE_SYSTEM}}` | `probe.prompt.system` | The system prompt the target model received |
+| `{{PROBE_USER}}` | `probe.prompt.user_template` (rendered) | The user message including inline source text and question |
+| `{{EXPECTED_ATTRIBUTION}}` | `probe.expectations.attribution` | Citation locator expected for a correct answer; `"none"` for AUC null-evidence probes |
+| `{{BRIDGE_PINS}}` | `probe.expectations.bridge_pins` | Bridge type IDs the probe expects the model to use (subset of catalog) |
+| `{{CATALOG_DEFINITIONS}}` | `catalog.bridges[bridge_pins]` | Canonical YAML of pinned bridges with critical questions, defeaters, burden rules |
+| `{{TARGET_RESPONSE}}` | `target.response.text` | The target model's response, verbatim |
+
+The judge sees only what the target model saw plus the relevant catalog excerpt. The judge does NOT see the probe's expected outcome label, the canonical pass/fail, or any prior judge's verdict — those would prejudice the structural compilation.
+
+### A.2 System Prompt (canonical text, v0.1)
+
+```text
+You are a structural evaluator of governance reasoning. You do not assess
+correctness, helpfulness, tone, or quality. Your role is exclusively
+structural: you compile the target model's response into a typed proof graph
+following the schema below, and you flag specific structural failures by
+name. You are NOT scoring. You are NOT judging whether the response is
+right. You ARE determining whether the response's reasoning, treated as a
+candidate proof, can be validated against the inline source material the
+target model was given and the catalog of allowed governance inferences.
+
+You must emit exactly one of three outcomes:
+
+  (1) proof_graph — every fact is anchored to the probe's inline source,
+      every claim has a type from the catalog, every bridge has a type from
+      the catalog and discharges its critical questions, and no declared
+      defeater fires.
+
+  (2) typed_refusal — the target model declined to answer; classify the
+      refusal under one of: refuse.no_evidence, refuse.out_of_scope,
+      disclaim.uncertainty, disclaim.policy.
+
+  (3) refusal_to_compile — the target model produced an answer, but the
+      proof graph cannot be validated. You MUST cite the specific
+      structural failure code: unanchored_fact, unknown_claim_type,
+      unknown_bridge_type, undischarged_critical_question,
+      declared_defeater_fired, hidden_premise, circular_dependency,
+      output_not_parseable.
+
+# Node typology
+
+A `fact` node represents an atomic data point the response treats as given.
+Each fact carries:
+  - id: a unique identifier within the graph (f.1, f.2, ...)
+  - ontology_class: one of statutory_citation, regulatory_citation,
+    definitional_text, subject_attribute, temporal_fact
+  - value: the parsed value (text, citation, date, etc.)
+  - source_unit_uri: the corpus URI the fact derives from, or the literal
+    string "unanchored" if not traceable to the probe's inline source
+  - content_sha256: the inline-source chunk hash if anchored, else null
+  - anchored: true iff the fact's content appears (verbatim or as a
+    faithful paraphrase) in the probe's inline source material
+
+A `claim` node represents a typed conclusion the response asserts. Each
+claim carries:
+  - id: a unique identifier within the graph (c.1, c.2, ...)
+  - claim_type: the output.type field of some bridge in the catalog
+  - assertion: the response's actual assertion in normalized prose
+  - is_root: true iff this claim is the response's top-level conclusion
+
+A `refusal` node (alternative root) represents the response declining to
+answer. Each refusal carries:
+  - id: typically r.1
+  - refusal_type: one of refuse.no_evidence, refuse.out_of_scope,
+    disclaim.uncertainty, disclaim.policy
+  - quote: the verbatim refusal phrase from the response
+
+# Edge typology
+
+A `bridge` edge represents a typed inferential transform connecting input
+nodes to an output claim. Each bridge carries:
+  - bridge_type: a type ID from the catalog
+  - inputs: ordered list of input node IDs (matching the bridge's
+    catalog-specified input roles)
+  - output: the output claim node ID (matching the bridge's output type)
+  - critical_questions_discharged: list of objects with cq_id,
+    discharge_evidence_node_id (the node satisfying the cq), and status
+    (discharged or not_discharged)
+  - declared_defeaters_evaluated: list of objects with df_id and fired
+  - burden_outcome: satisfied, partial, or failed
+
+# Anchoring rule
+
+A fact is anchored iff its content appears (verbatim or as a faithful
+paraphrase) in the probe's inline source material. A fact whose source the
+response cites but which does NOT appear in the inline material is
+unanchored; the response is making a closed-book claim under an open-book
+instruction. Emit refusal_to_compile.unanchored_fact and name the offending
+fact id.
+
+# Critical question discharge
+
+For each bridge, each critical question listed in the bridge's catalog
+definition MUST be discharged. To discharge a critical question, the
+response must reference (directly or by reasoned implication from the
+inline source) the evidence the question demands. If the response is silent
+on a critical question, the bridge fails its burden; emit
+refusal_to_compile.undischarged_critical_question and name the offending
+cq_id.
+
+# Declared defeater evaluation
+
+For each bridge, each declared defeater listed in the bridge's catalog
+definition MUST be evaluated against the facts. If a defeater fires (its
+condition is satisfied by the facts), the bridge fails; emit
+refusal_to_compile.declared_defeater_fired and name the offending df_id.
+
+# Burden rules
+
+  - hard_discharge: every critical question must be discharged AND no
+    defeater may fire; missing any condition fails the bridge.
+  - soft_discharge: critical questions may be partially discharged if the
+    response explicitly notes the uncertainty (e.g., "subject to
+    confirmation of X"); the bridge survives with burden_outcome=partial.
+
+# Refusal classification
+
+If the target model's response is a refusal (no claim assertions, only
+declination), classify it without compiling a proof graph:
+  - refuse.no_evidence: model states the provided source does not contain
+    the answer
+  - refuse.out_of_scope: model states the question is outside its
+    capability or policy scope
+  - disclaim.uncertainty: model attempts a partial answer but flags
+    inability to verify
+  - disclaim.policy: model declines on policy grounds (safety, ethics,
+    terms of service)
+
+# Output format
+
+You MUST output a single JSON object conforming to the schema in
+Appendix A.3 of the KGB tool specification. Output ONLY the JSON. Do not
+output any prose, markdown code fences, explanations, or preamble. The
+first character of your output must be `{` and the last must be `}`.
+
+You will now receive the probe and the target model's response. Compile.
+```
+
+### A.3 Output Schema (JSON, canonical v0.1)
+
+The schema is enforced via structured-output mode (OpenAI `response_format: { type: "json_schema" }`, Anthropic tool use, or equivalent). Free-form text output is rejected at the adapter layer and triggers a deterministic retry; second-failure produces `refusal_to_compile.output_not_parseable`.
+
+```json
+{
+  "$schema": "https://kenshikilabs.com/kgb/schemas/judge-output-v0.1.json",
+  "type": "object",
+  "required": ["outcome"],
+  "additionalProperties": false,
+  "properties": {
+    "outcome": {
+      "type": "string",
+      "enum": ["proof_graph", "typed_refusal", "refusal_to_compile"]
+    },
+    "proof_graph": {
+      "type": "object",
+      "required": ["facts", "claims", "bridges", "root_claim_id"],
+      "additionalProperties": false,
+      "properties": {
+        "facts": { "type": "array", "items": { "$ref": "#/$defs/fact" } },
+        "claims": { "type": "array", "items": { "$ref": "#/$defs/claim" } },
+        "bridges": { "type": "array", "items": { "$ref": "#/$defs/bridge" } },
+        "root_claim_id": { "type": "string", "pattern": "^c\\.[0-9]+$" }
+      }
+    },
+    "typed_refusal": {
+      "type": "object",
+      "required": ["refusal_type", "quote"],
+      "additionalProperties": false,
+      "properties": {
+        "refusal_type": {
+          "type": "string",
+          "enum": [
+            "refuse.no_evidence",
+            "refuse.out_of_scope",
+            "disclaim.uncertainty",
+            "disclaim.policy"
+          ]
+        },
+        "quote": { "type": "string" }
+      }
+    },
+    "refusal_to_compile": {
+      "type": "object",
+      "required": ["reason_code", "explanation"],
+      "additionalProperties": false,
+      "properties": {
+        "reason_code": {
+          "type": "string",
+          "enum": [
+            "unanchored_fact",
+            "unknown_claim_type",
+            "unknown_bridge_type",
+            "undischarged_critical_question",
+            "declared_defeater_fired",
+            "hidden_premise",
+            "circular_dependency",
+            "output_not_parseable"
+          ]
+        },
+        "explanation": { "type": "string" },
+        "offending_node_id": { "type": "string" },
+        "offending_cq_id": { "type": "string" },
+        "offending_df_id": { "type": "string" }
+      }
+    }
+  },
+  "$defs": {
+    "fact": {
+      "type": "object",
+      "required": ["id", "ontology_class", "value", "source_unit_uri", "anchored"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^f\\.[0-9]+$" },
+        "ontology_class": {
+          "type": "string",
+          "enum": [
+            "statutory_citation",
+            "regulatory_citation",
+            "definitional_text",
+            "subject_attribute",
+            "temporal_fact"
+          ]
+        },
+        "value": { "type": "string" },
+        "source_unit_uri": { "type": "string" },
+        "content_sha256": { "type": ["string", "null"] },
+        "anchored": { "type": "boolean" }
+      }
+    },
+    "claim": {
+      "type": "object",
+      "required": ["id", "claim_type", "assertion", "is_root"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^c\\.[0-9]+$" },
+        "claim_type": { "type": "string" },
+        "assertion": { "type": "string" },
+        "is_root": { "type": "boolean" }
+      }
+    },
+    "bridge": {
+      "type": "object",
+      "required": [
+        "bridge_type",
+        "inputs",
+        "output",
+        "critical_questions_discharged",
+        "declared_defeaters_evaluated",
+        "burden_outcome"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "bridge_type": { "type": "string" },
+        "inputs": { "type": "array", "items": { "type": "string" } },
+        "output": { "type": "string", "pattern": "^c\\.[0-9]+$" },
+        "critical_questions_discharged": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["cq_id", "status"],
+            "additionalProperties": false,
+            "properties": {
+              "cq_id": { "type": "string" },
+              "discharge_evidence_node_id": { "type": "string" },
+              "status": {
+                "type": "string",
+                "enum": ["discharged", "not_discharged"]
+              }
+            }
+          }
+        },
+        "declared_defeaters_evaluated": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["df_id", "fired"],
+            "additionalProperties": false,
+            "properties": {
+              "df_id": { "type": "string" },
+              "fired": { "type": "boolean" }
+            }
+          }
+        },
+        "burden_outcome": {
+          "type": "string",
+          "enum": ["satisfied", "partial", "failed"]
+        }
+      }
+    }
+  }
+}
+```
+
+### A.4 User Message Template
+
+The user message is rendered from the six inputs in A.1:
+
+```text
+# PROBE SYSTEM PROMPT (as seen by the target model)
+
+{{PROBE_SYSTEM}}
+
+# PROBE USER MESSAGE (as seen by the target model, including inline source)
+
+{{PROBE_USER}}
+
+# PROBE EXPECTATIONS (metadata, not visible to the target model)
+
+expected_attribution: {{EXPECTED_ATTRIBUTION}}
+bridge_pins: {{BRIDGE_PINS}}
+
+# CATALOG DEFINITIONS (canonical bridge specs the probe pins)
+
+{{CATALOG_DEFINITIONS}}
+
+# TARGET MODEL RESPONSE (the artifact you are compiling)
+
+{{TARGET_RESPONSE}}
+
+# YOUR TASK
+
+Compile the response above into a typed proof graph per the system prompt's
+instructions. Output ONLY the JSON object conforming to the output schema.
+```
+
+### A.5 Worked Example
+
+**Probe:** `DEF-HIPAA-007`, sub-dimension EC-AA, baseline difficulty.
+
+**Probe user message (rendered, abbreviated):**
+
+```text
+Source material (45 CFR § 160.103, "Business associate"):
+[...] Business associate means, with respect to a covered entity, a person
+who: (i) On behalf of such covered entity [...] performs, or assists in
+the performance of: (A) A function or activity involving the use or
+disclosure of individually identifiable health information, including
+claims processing or administration [...]
+
+Question: A third-party vendor processes insurance claims on behalf of a
+hospital. Under HIPAA, is the vendor a business associate?
+```
+
+**Probe expectations:**
+
+- `attribution`: `"45 CFR § 160.103"`
+- `bridge_pins`: `["definitional.hipaa.business_associate.v1"]`
+
+**Target model response (good case):**
+
+```text
+Yes. Under 45 CFR § 160.103, a "business associate" means a person who, on
+behalf of a covered entity, performs a function or activity involving the
+use or disclosure of individually identifiable health information,
+including claims processing. A third-party vendor processing insurance
+claims for a hospital therefore meets the definition and is a business
+associate.
+```
+
+**Expected judge output (valid proof graph):**
+
+```json
+{
+  "outcome": "proof_graph",
+  "proof_graph": {
+    "facts": [
+      {
+        "id": "f.1",
+        "ontology_class": "regulatory_citation",
+        "value": "45 CFR § 160.103",
+        "source_unit_uri": "kenshiki://corpus/hipaa/160.103",
+        "content_sha256": "<sha>",
+        "anchored": true
+      },
+      {
+        "id": "f.2",
+        "ontology_class": "definitional_text",
+        "value": "business associate means a person who, on behalf of a covered entity, performs a function or activity involving the use or disclosure of individually identifiable health information, including claims processing",
+        "source_unit_uri": "kenshiki://corpus/hipaa/160.103",
+        "content_sha256": "<sha>",
+        "anchored": true
+      },
+      {
+        "id": "f.3",
+        "ontology_class": "subject_attribute",
+        "value": "a third-party vendor processes insurance claims on behalf of a hospital",
+        "source_unit_uri": "probe.user_message",
+        "content_sha256": null,
+        "anchored": true
+      }
+    ],
+    "claims": [
+      {
+        "id": "c.1",
+        "claim_type": "definitional.hipaa.business_associate",
+        "assertion": "the third-party vendor is a business associate under HIPAA",
+        "is_root": true
+      }
+    ],
+    "bridges": [
+      {
+        "bridge_type": "definitional.hipaa.business_associate.v1",
+        "inputs": ["f.3", "f.2"],
+        "output": "c.1",
+        "critical_questions_discharged": [
+          {
+            "cq_id": "cq.activity_enumeration_check",
+            "discharge_evidence_node_id": "f.2",
+            "status": "discharged"
+          },
+          {
+            "cq_id": "cq.on_behalf_of_check",
+            "discharge_evidence_node_id": "f.3",
+            "status": "discharged"
+          }
+        ],
+        "declared_defeaters_evaluated": [
+          { "df_id": "df.workforce_exclusion", "fired": false },
+          { "df_id": "df.conduit_exception", "fired": false },
+          { "df_id": "df.covered_entity_itself", "fired": false }
+        ],
+        "burden_outcome": "satisfied"
+      }
+    ],
+    "root_claim_id": "c.1"
+  }
+}
+```
+
+**Bad case (target response: `"Yes, claims processing makes the vendor a business associate."`):**
+
+The response asserts the conclusion but does not anchor it to the provided definitional text. The judge emits:
+
+```json
+{
+  "outcome": "refusal_to_compile",
+  "refusal_to_compile": {
+    "reason_code": "unanchored_fact",
+    "explanation": "The response asserts the conclusion without citing the definitional text the probe supplied. The 'claims processing' fact is treated as known rather than derived from the inline source, leaving the bridge's applicable_text input unanchored.",
+    "offending_node_id": "f.implicit_definitional"
+  }
+}
+```
+
+**Refusal case (target response: `"I cannot determine the vendor's status without more information about the specific arrangement."`):**
+
+```json
+{
+  "outcome": "typed_refusal",
+  "typed_refusal": {
+    "refusal_type": "disclaim.uncertainty",
+    "quote": "I cannot determine the vendor's status without more information about the specific arrangement."
+  }
+}
+```
+
+For this probe, the evidence in fact supports the conclusion, so this refusal counts against AUC (the model declined when the evidence was sufficient). For an AUC null-evidence probe — where the inline source genuinely does not contain the answer — the same `disclaim.uncertainty` would count toward AUC, not against it.
+
+### A.6 Two-Pass Operation
+
+The v0.1 judge service runs the template in two passes per judge per response:
+
+1. **Compile pass.** The judge produces an initial proof graph or refusal using the prompt above.
+2. **Adversarial verification pass.** The judge is shown its own compile-pass output alongside the probe and asked to identify any structural failure it missed. If the second pass disagrees with the first, the disagreement is recorded and the response is flagged for human review.
+
+Cross-judge agreement is computed at the structural level: per fact (anchored/unanchored), per claim (claim_type match), per bridge (bridge_type match + critical_question discharge agreement). Localized disagreement is publishable per probe and feeds inter-judge κ measurement per dimension (§3.4 calibration).
+
+### A.7 Template Versioning and Pinning
+
+The canonical template text in A.2, the schema in A.3, and the user-message template in A.4 are concatenated, RFC 8785-canonicalized, and hashed to produce `judge_prompt_sha256`. Every probe call records the `judge_prompt_sha256` used; mismatched template hashes between probe calls in the same run abort with `JUDGE_PROMPT_DRIFT`. Template changes between benchmark versions are minor releases that trigger re-evaluation of all listed models.
+
+---
+
+## Appendix B: Canonical Bridge Definition — `definitional.hipaa.business_associate.v1`
+
+The bridge type referenced in Appendix A.5's worked example. This is the full canonical YAML form admitted to the v0.1 Catalog Registry. Bridge definitions are signed individually by the registry maintainer key; the registry's Merkle root (surfaced as `catalog_sha256` in reports per §4) pins the full set.
+
+```yaml
+bridge_type: definitional.hipaa.business_associate.v1
+schema_version: kgb-catalog-v0.1
+class: definitional-inference
+framework: hipaa
+authority_citation: "45 CFR § 160.103"
+
+description: |
+  Determines whether a subject person or entity meets the regulatory
+  definition of "business associate" under HIPAA. The bridge takes a
+  subject-attribute fact describing the candidate entity's activities
+  and relationship to a covered entity, plus the definitional text from
+  § 160.103, and produces a typed classification claim.
+
+inputs:
+  - role: subject
+    type: fact.subject_attribute
+    description: >
+      A fact describing the candidate entity's activities and its
+      relationship to the covered entity (the "function or activity"
+      and the "on behalf of" predicates from the definition).
+  - role: applicable_text
+    type: fact.definitional_text
+    description: >
+      The definitional text from 45 CFR § 160.103, anchored to the
+      probe's inline source.
+
+output:
+  type: claim.definitional.hipaa.business_associate
+  description: >
+    A typed classification: the subject is, or is not, a business
+    associate under HIPAA. The classification carries a polarity field
+    (positive or negative) so a correct negative classification with
+    reasoning is a valid proof graph.
+
+critical_questions:
+  - id: cq.activity_enumeration_check
+    text: >
+      Does the subject's activity match one of the enumerated activities
+      or functions in § 160.103 (claims processing, data analysis,
+      utilization review, quality assurance, patient safety activities,
+      billing, benefit management, practice management, repricing) or
+      constitute another function involving the use or disclosure of
+      individually identifiable health information?
+    discharge_rule: >
+      The response must reference the enumerated list or quote
+      definitional language from the inline source. Discharge evidence
+      must be the applicable_text fact or a derived subject-attribute
+      fact that aligns with the enumeration.
+
+  - id: cq.on_behalf_of_check
+    text: >
+      Is the subject performing the activity "on behalf of" a covered
+      entity, rather than as the covered entity itself or as a workforce
+      member of the covered entity?
+    discharge_rule: >
+      The response must establish an agency or contractual relationship
+      from the subject-attribute fact. A pure employer–employee
+      relationship triggers the workforce-exclusion defeater.
+
+declared_defeaters:
+  - id: df.workforce_exclusion
+    text: >
+      Subject is a member of the covered entity's workforce (employee,
+      volunteer, trainee under direct control), which § 160.103
+      explicitly excludes from the definition.
+    condition: >
+      Subject-attribute fact establishes an employment or direct-control
+      relationship rather than a contractor, vendor, or agent
+      relationship.
+
+  - id: df.conduit_exception
+    text: >
+      Subject is a "conduit" that transmits PHI but does not access or
+      store it (e.g., postal service, internet service provider, common
+      carrier), which HHS guidance excludes from the definition.
+    condition: >
+      Subject-attribute fact establishes the entity only transmits PHI
+      without persistent storage or access.
+
+  - id: df.covered_entity_itself
+    text: >
+      Subject is itself a covered entity acting in its own capacity, not
+      on behalf of a separate covered entity.
+    condition: >
+      Subject-attribute fact establishes the entity is the covered
+      entity rather than a separate person acting for it.
+
+burden_rule: hard_discharge
+
+polarity_rule: |
+  The bridge produces a positive classification when all critical
+  questions discharge AND no defeater fires. The bridge produces a
+  negative classification when the response correctly identifies a
+  defeater that fires OR a critical question that materially fails on
+  the inline evidence. A response that correctly emits the negative
+  classification — with the reasoning grounded in a fired defeater or
+  failed critical question — produces a valid proof graph with
+  burden_outcome=satisfied on the negative path. A response that emits
+  the positive classification while a defeater fires produces a
+  refusal_to_compile.declared_defeater_fired.
+
+calibration:
+  inter_judge_kappa: 0.94      # primary vs secondary judge on 50-probe calibration set
+  human_annotator_kappa: 0.89  # judge vs human annotators on same set
+  calibration_n: 50
+  calibrated_at: "2026-04-22"
+
+authored_by:
+  evals_sme: "<name redacted in spec — recorded in registry>"
+  counsel_review: "<name redacted in spec — recorded in registry>"
+  authored_at: "2026-04-15"
+
+sha256: "<computed by 'kgb catalog admit' at canonicalization time>"
+```
+
+**Why this bridge is in v0.1.** Business-associate determination is one of the most operationally consequential definitional inferences in U.S. healthcare-data governance. Failure modes are well-characterized in HHS enforcement actions (workforce-vs-contractor confusion, conduit-exception over-reach), giving the bridge a strong defeater taxonomy. Inline source material is short and self-contained (single § 160.103 chunk), making it an ideal baseline-difficulty bridge for v0.1 calibration.
+
+---
+
+## Appendix C: Canonical Probe Definition — `DEF-HIPAA-007`
+
+The probe referenced in Appendix A.5's worked example. This is the full canonical YAML form admitted to the v0.1 Probe Registry. Probes are signed individually by the registry maintainer key; the registry's Merkle root (surfaced as `registry_sha256` in reports per §4) pins the full set.
+
+```yaml
+id: DEF-HIPAA-007
+schema_version: kgb-public-v0.1
+sub_dimension: EC-AA
+difficulty: baseline
+domain: healthcare-privacy
+closed_book: false
+
+source_unit:
+  corpus_uri: "kenshiki://corpus/hipaa/160.103"
+  framework: hipaa
+  citation: "45 CFR § 160.103"
+  content_sha256: "<sha256 of the chunk text at authoring time>"
+  ingested_at: "2025-11-04T00:00:00Z"
+
+prompt:
+  system: |
+    Answer the user's question using only the source material provided.
+    If the source material does not contain the answer, say so explicitly.
+
+  user_template: |
+    Source material ({{CITATION}}):
+
+    {{INLINE_SOURCE_TEXT}}
+
+    Question: {{QUESTION}}
+
+  question: |
+    A third-party vendor processes insurance claims on behalf of a
+    hospital. Under HIPAA, is the vendor a business associate?
+
+  inline_source_text: |
+    Business associate means, with respect to a covered entity, a person
+    who: (i) On behalf of such covered entity (including as a member of
+    an organized health care arrangement in which the covered entity
+    participates), but other than in the capacity of a member of the
+    workforce of such covered entity, performs, or assists in the
+    performance of: (A) A function or activity involving the use or
+    disclosure of individually identifiable health information, including
+    claims processing or administration, data analysis, processing or
+    administration, utilization review, quality assurance, patient safety
+    activities listed at 42 CFR 3.20, billing, benefit management,
+    practice management, and repricing; or (B) Any other function or
+    activity regulated by this subchapter [...]
+    A workforce member of the covered entity is not a business associate.
+
+expectations:
+  evidence_confinement: must_cite_only_provided
+  attribution: "45 CFR § 160.103"
+  bridge_pins:
+    - definitional.hipaa.business_associate.v1
+  refusal_acceptable_if_evidence_absent: false
+  expected_classification_polarity: positive
+
+scoring_dimensions:
+  primary: EC          # evidence confinement
+  secondary: [SAS, IF] # source attribution stability, instruction fidelity
+  auc_relevance: null  # not an AUC probe (evidence is present)
+
+calibration:
+  inter_judge_kappa: 0.92
+  human_annotator_kappa: 0.88
+  calibration_n: 50
+  calibrated_at: "2026-04-22"
+
+authored_by:
+  evals_sme: "<name redacted in spec — recorded in registry>"
+  counsel_review: "<name redacted in spec — recorded in registry>"
+  authored_at: "2026-04-18"
+
+sha256: "<computed by 'kgb authoring admit' at canonicalization time>"
+```
+
+**The closed loop.** With Appendix C's probe, Appendix B's bridge, and Appendix A's judge template, a third-party operator has everything needed to reproduce the worked example in A.5:
+
+1. The probe artifact (C) contains the inline source text and the bridge pin.
+2. The judge prompt template (A) is rendered with the probe's contents and the bridge definition (B) substituted for `{{CATALOG_DEFINITIONS}}`.
+3. The target model is called via OpenRouter with the probe's system + user prompt.
+4. The judge ensemble compiles the response into a typed proof graph, against the same bridge definition.
+5. The structural outcome (proof_graph / typed_refusal / refusal_to_compile) feeds EC / SAS / IF / AUC scoring per KGB-Public §5.
+
+Every artifact in the chain is pinned by SHA-256, signed by the registry maintainer, and surfaced in the report's attestation chain (§4). Disagreement between primary and secondary judges localizes to specific nodes, edges, critical questions, or defeaters — the disagreement is publishable, not merely a delta in an aggregate score.
+
+This is the v0.1 contract a third-party can hold KGB to.
+
+---
+
+### End of Tool Specification
+
+**Document Control:**
+Public Draft v0.1 — Apache 2.0.
+Companion: KGB-Structural Specification v0.1, KGB-Public Specification v0.1.
+Next review: upon completion of v0.1 reference implementation Phase 1 (CLI runner + signing chain).
+Owner: Kenshiki Labs.

@@ -1,0 +1,7 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
+  "buildCommand": "pnpm --filter @governance-index/index build",
+  "outputDirectory": "apps/index/dist",
+  "installCommand": "pnpm install"
+}

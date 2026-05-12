@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Node / TanStack / Vite
+node_modules/
+.next/
+out/
+.turbo/
+.vercel/
+.output/
+.nitro/
+.tanstack/
+.vinxi/
+.wrangler/
+dist-ssr/
+
+# TanStack Router auto-generated
+**/src/routeTree.gen.ts
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Coverage
+.coverage
+htmlcov/
+coverage.xml
+*.cover
+
+# Local ops scratch artifacts. These frequently contain presigned URLs,
+# temporary SSM command payloads, or copied response bodies.
+.codex-tmp/
+codex-tmp/
+tmp/ssm-*.json
+tmp/*-ssm*.json
+*-ssm-payload.json
+*-ssm-output.json
+*presign*.json
+payload*.json
+*.textClipping
