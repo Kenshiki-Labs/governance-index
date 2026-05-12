@@ -1,0 +1,54 @@
+import { Hero } from "../../components/home/Hero";
+import { Section, NarrowSection } from "../../components/home/Section";
+import { SampleReportPreview } from "../../components/home/SampleReportPreview";
+import { DimensionGrid } from "../../components/home/DimensionGrid";
+import { HowItWorksSteps } from "../../components/home/HowItWorksSteps";
+import { Cta } from "../../components/home/Cta";
+
+<Hero
+  badge="v0.1 · Launching Q3 2026"
+  title="The Governance Benchmark"
+  tagline="The public benchmark for AI governance properties. The yardstick the industry argues about."
+/>
+
+<Section tone="muted">
+  <SampleReportPreview />
+</Section>
+
+<NarrowSection>
+
+## Governance has had no shared yardstick
+
+Hallucination has HaluEval, FACTS Grounding, SimpleQA. Capability has MMLU and HELM. Procurement teams ask vendors "does your model stay within evidence?" and get marketing answers. Regulators ask "is this model auditable?" and get principles documents.
+
+**The Governance Benchmark closes that gap.** A public, methodology-open, continuously-published benchmark that measures whether a model's reasoning can be governed — whether it stays within evidence, attributes correctly, follows instructions, and abstains when it should. Open source. Apache 2.0. Reproducible builds. Cryptographically signed reports.
+
+</NarrowSection>
+
+<Section>
+  <h2 className="text-3xl md:text-4xl font-bold mb-4">Four dimensions of governed reasoning</h2>
+  <p className="text-lg opacity-80 mb-12 max-w-3xl">
+    Each probe carries inline regulatory source material and a question. The judge ensemble
+    compiles the target model's response into a typed proof graph, then measures four
+    first-order properties.
+  </p>
+  <DimensionGrid />
+</Section>
+
+<Section tone="muted">
+  <h2 className="text-3xl md:text-4xl font-bold mb-4">How an evaluation runs</h2>
+  <p className="text-lg opacity-80 mb-10 max-w-3xl">
+    A KGB run is a chain of typed artifacts, each pinned by SHA-256.
+  </p>
+  <HowItWorksSteps />
+</Section>
+
+<Section>
+  <Cta
+    heading={<>KGB is to AI governance what HaluEval is to factuality — <br />the public yardstick the industry argues about.</>}
+    primaryHref="/specs"
+    primaryLabel="Read the specifications"
+    secondaryHref="https://github.com/Kenshiki-Labs/governance-index"
+    secondaryLabel="View on GitHub"
+  />
+</Section>
