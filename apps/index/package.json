@@ -7,10 +7,12 @@
     "dev": "vite dev --port 3000",
     "prebuild": "node scripts/generate-aeo-artifacts.mjs",
     "build": "vite build",
+    "postbuild": "node scripts/prerender.mjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "aeo:generate": "node scripts/generate-aeo-artifacts.mjs",
-    "aeo:audit": "node scripts/aeo-audit.mjs"
+    "aeo:audit": "node scripts/aeo-audit.mjs",
+    "prerender": "node scripts/prerender.mjs"
   },
   "dependencies": {
     "@mdx-js/rollup": "^3.1.0",
@@ -32,6 +34,8 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^6.0.1",
+    "puppeteer": "^24.43.1",
+    "sirv": "^3.0.2",
     "typescript": "^5.7.0",
     "vite": "^8.0.0"
   }

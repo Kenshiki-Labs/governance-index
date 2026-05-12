@@ -3,5 +3,8 @@
   "framework": "vite",
   "buildCommand": "pnpm --filter @governance-index/index build",
   "outputDirectory": "apps/index/dist",
-  "installCommand": "pnpm install"
+  "installCommand": "pnpm install",
+  "cleanUrls": true,
+  "trailingSlash": false,
+  "rewrites": [{ "source": "/((?!api|assets|.*\\..*).*)", "destination": "/index.html" }]
 }
