@@ -1,0 +1,26 @@
+# The Governance Benchmark
+
+> The Kenshiki Governance Benchmark (KGB) is the public benchmark for AI governance properties. It measures whether a model's reasoning can be governed — whether it stays within evidence, attributes correctly, follows instructions, and abstains when it should. Open methodology, open-source runner, cryptographically signed reports, continuously-updated leaderboard.
+
+## Top-level pages
+
+- [The Governance Benchmark](https://index.kenshikilabs.com/): The public benchmark for AI governance properties. The yardstick the industry argues about.
+- [Specifications](https://index.kenshikilabs.com/specs): The four KGB specifications — methodology, runner, leaderboard governance.
+
+## Methodology specifications
+
+- [KGB Executive Summary v0.1](https://index.kenshikilabs.com/specs/exec-summary): One-page methodology overview: what KGB measures, how evaluations run, conflict-of-interest disclosure.
+- [KGB-Public v0.1 — Behavioral Methodology](https://index.kenshikilabs.com/specs/kgb-public): Behavioral probe methodology — EC / SAS / IF / AUC dimensions, multi-judge ensemble, calibration, regulatory mapping.
+- [KGB-Structural v0.1 — Artifact Audit Methodology](https://index.kenshikilabs.com/specs/kgb-structural): Artifact-audit methodology — five hard gates, predicate classes, categorical compliance taxonomy.
+- [KGB Tool v0.1 — Engineering Reference](https://index.kenshikilabs.com/specs/kgb-tool): Engineering reference for the runner — adapter, multi-judge ensemble, signing chain, canonical DAG-judge prompt template.
+
+## Reports
+
+- [Sample KGB report](https://index.kenshikilabs.com/reports/sample): Realistic mock of a v0.1 signed report — classification, scorecard, attestation chain, replay command.
+
+## Source repository
+
+- [governance-index on GitHub](https://github.com/Kenshiki-Labs/governance-index): the reference Python runner (Apache 2.0), the four MDX methodology specifications, and the TanStack site source.
+- [Methodology specs (raw MDX)](https://github.com/Kenshiki-Labs/governance-index/tree/main/docs/specs)
+- [Apache 2.0 license](https://github.com/Kenshiki-Labs/governance-index/blob/main/LICENSE)
+

@@ -1,0 +1,43 @@
+# Governance Benchmark — crawl directives
+# Generated 2026-05-12 by apps/index/scripts/generate-aeo-artifacts.mjs
+
+User-agent: *
+Allow: /
+Disallow: /admin
+
+User-agent: GPTBot
+Allow: /
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: Claude-Web
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Applebot-Extended
+Allow: /
+
+User-agent: cohere-ai
+Allow: /
+
+User-agent: Bytespider
+Allow: /
+
+User-agent: Diffbot
+Allow: /
+
+Sitemap: https://index.kenshikilabs.com/sitemap.xml
+# AI-discovery index
+# https://index.kenshikilabs.com/llms.txt

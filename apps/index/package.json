@@ -5,9 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev --port 3000",
+    "prebuild": "node scripts/generate-aeo-artifacts.mjs",
     "build": "vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "aeo:generate": "node scripts/generate-aeo-artifacts.mjs"
   },
   "dependencies": {
     "@mdx-js/rollup": "^3.1.0",
@@ -18,7 +20,9 @@
     "daisyui": "^5.0.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "remark-frontmatter": "^5.0.0",
     "remark-gfm": "^4.0.0",
+    "remark-mdx-frontmatter": "^5.2.0",
     "tailwindcss": "^4.1.18"
   },
   "devDependencies": {

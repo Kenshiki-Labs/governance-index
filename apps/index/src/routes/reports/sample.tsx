@@ -1,6 +1,8 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 
 import { PageLayout } from "../../components/PageLayout";
+import { SEOHead } from "../../components/SEOHead";
+import { deriveAeoPageModel } from "../../lib/aeo/derive";
 
 export const Route = createFileRoute("/reports/sample")({ component: SampleReport });
 
@@ -100,59 +102,75 @@ const MOCK_REPORT = {
 
 function SampleReport() {
   const r = MOCK_REPORT;
+  const aeo = deriveAeoPageModel({
+    family: "sample-report",
+    path: "/reports/sample",
+    defaults: {
+      title: "Sample KGB report — anthropic/claude-opus-4-7",
+      description:
+        "Mock KGB report illustrating the v0.1 schema: behavioral classification, four-dimension scorecard, reliability profile, regulatory mapping, judge ensemble, probe-level outcomes, run economics, and the five-hash attestation chain.",
+    },
+  });
 
   return (
-    <PageLayout>
-      <section className="px-6 pt-6">
-        <div className="max-w-5xl mx-auto flex items-center gap-2 text-sm opacity-70">
-          <Link to="/" className="link link-hover">
-            Home
-          </Link>
-          <span aria-hidden="true">/</span>
-          <span>Sample report</span>
-        </div>
-      </section>
-
-      <section className="px-6 py-10">
-        <div className="max-w-5xl mx-auto">
-          <div className="flex items-center gap-2 mb-4">
-            <span className="badge badge-warning badge-outline">Mock data · for layout only</span>
-            <span className="badge badge-outline">v0.1 schema</span>
+    <>
+      <SEOHead model={aeo} />
+      <PageLayout>
+        <section className="px-6 pt-6">
+          <div className="max-w-5xl mx-auto flex items-center gap-2 text-sm opacity-70">
+            <Link to="/" className="link link-hover">
+              Home
+            </Link>
+            <span aria-hidden="true">/</span>
+            <span>Sample report</span>
           </div>
+        </section>
 
-          <h1 className="text-3xl md:text-4xl font-bold tracking-tight mb-2">
-            Sample report:{" "}
-            <span className="font-mono">
-              {r.target.provider}/{r.target.model}
-            </span>
-          </h1>
-          <p className="text-sm opacity-70 mb-8">
-            Report ID <span className="font-mono">{r.report_id}</span> · Generated {r.generated_at}{" "}
-            · Mode <span className="font-mono">{r.mode}</span> · Adapter{" "}
-            <span className="font-mono">{r.adapter}</span>
-          </p>
+        <section className="px-6 py-10">
+          <div className="max-w-5xl mx-auto">
+            <div className="flex items-center gap-2 mb-4">
+              <span className="badge badge-warning badge-outline">Mock data · for layout only</span>
+              <span className="badge badge-outline">v0.1 schema</span>
+            </div>
 
-          <ClassificationBanner classification={r.classification} flags={r.critical_flags} />
+            <h1 className="text-3xl md:text-4xl font-bold tracking-tight mb-2">
+              Sample report:{" "}
+              <span className="font-mono">
+                {r.target.provider}/{r.target.model}
+              </span>
+            </h1>
+            <p className="text-sm opacity-70 mb-8">
+              Report ID <span className="font-mono">{r.report_id}</span> · Generated{" "}
+              {r.generated_at} · Mode <span className="font-mono">{r.mode}</span> · Adapter{" "}
+              <span className="font-mono">{r.adapter}</span>
+            </p>
 
-          <div className="grid md:grid-cols-2 gap-6 mt-8">
-            <ScorecardCard dimensions={r.dimensions} />
-            <ReliabilityCard reliability={r.reliability} />
+            <ClassificationBanner classification={r.classification} flags={r.critical_flags} />
+
+            <div className="grid md:grid-cols-2 gap-6 mt-8">
+              <ScorecardCard dimensions={r.dimensions} />
+              <ReliabilityCard reliability={r.reliability} />
+            </div>
+
+            <RegulatoryCard regulatory={r.regulatory} />
+
+            <JudgesCard judges={r.judges} />
+
+            <ProbeSamplesCard samples={r.probe_samples} totalCount={r.probe_count} />
+
+            <RunMetaCard
+              cost={r.cost_usd}
+              duration={r.duration_seconds}
+              probeCount={r.probe_count}
+            />
+
+            <AttestationCard attestation={r.attestation} evaluator={r.evaluator} />
+
+            <ReplayCard reportId={r.report_id} />
           </div>
-
-          <RegulatoryCard regulatory={r.regulatory} />
-
-          <JudgesCard judges={r.judges} />
-
-          <ProbeSamplesCard samples={r.probe_samples} totalCount={r.probe_count} />
-
-          <RunMetaCard cost={r.cost_usd} duration={r.duration_seconds} probeCount={r.probe_count} />
-
-          <AttestationCard attestation={r.attestation} evaluator={r.evaluator} />
-
-          <ReplayCard reportId={r.report_id} />
-        </div>
-      </section>
-    </PageLayout>
+        </section>
+      </PageLayout>
+    </>
   );
 }
 
